@@ -1,0 +1,58 @@
+config:
+  target: "http://localhost:3000"
+  phases:
+    - name: "warm-up"
+      duration: 30
+      arrivalRate: 2
+    - name: "ramp-up"
+      duration: 60
+      arrivalRate: 2
+      rampTo: 20
+    - name: "sustained"
+      duration: 60
+      arrivalRate: 20
+  defaults:
+    headers:
+      Content-Type: "application/json"
+  # Thresholds: p95 < 500ms, error rate < 1%
+  ensure:
+    p95: 500
+    maxErrorRate: 1
+
+scenarios:
+  - name: "Auth API — login endpoint"
+    weight: 30
+    flow:
+      - post:
+          url: "/api/auth/login"
+          json:
+            email: "loadtest@example.com"
+            password: "InvalidPass123!"
+          expect:
+            - statusCode:
+                - 401
+                - 400
+
+  - name: "Replenishment v2 — unauthenticated"
+    weight: 40
+    flow:
+      - get:
+          url: "/api/replenishment/v2?clientId=00000000-0000-0000-0000-000000000001&fromDate=2026-01-01&toDate=2026-01-31&groupBy=StyleNo"
+          expect:
+            - statusCode: 401
+
+  - name: "Settings — unauthenticated"
+    weight: 15
+    flow:
+      - get:
+          url: "/api/settings"
+          expect:
+            - statusCode: 401
+
+  - name: "Roles — unauthenticated"
+    weight: 15
+    flow:
+      - get:
+          url: "/api/roles"
+          expect:
+            - statusCode: 401

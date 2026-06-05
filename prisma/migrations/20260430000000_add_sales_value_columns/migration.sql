@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "sales" ADD COLUMN "SaleValue" DECIMAL(12,2);
+ALTER TABLE "sales" ADD COLUMN "CRAmount" DECIMAL(12,2);

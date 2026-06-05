@@ -1,0 +1,413 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model users {
+  UserID         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  Username       String    @unique @db.VarChar
+  Email          String    @unique @db.VarChar
+  PasswordHash   String    @db.VarChar
+  FirstName      String    @db.VarChar
+  LastName       String    @db.VarChar
+  Role           String    @db.VarChar
+  RoleID         String?   @db.Uuid
+  IsFirstLogin   Boolean   @default(true)
+  IsActive       Boolean   @default(true)
+  OtpHash            String?   @db.VarChar
+  OtpExpiresAt       DateTime? @db.Timestamp(6)
+  InviteToken        String?   @unique @db.VarChar
+  InviteTokenExpiry  DateTime? @db.Timestamp(6)
+  InviteTokenUsed    Boolean   @default(false)
+  AvatarKey          String?   @db.VarChar
+  CreatedAt          DateTime  @default(now()) @db.Timestamp(6)
+  ModifiedAt     DateTime  @default(now()) @db.Timestamp(6)
+  ModifiedByID   String?   @db.Uuid
+  ModifiedByUser    users?           @relation("UserModifiedBy", fields: [ModifiedByID], references: [UserID], onDelete: SetNull)
+  ModifiedUsers     users[]          @relation("UserModifiedBy")
+  UserRole          roles?           @relation("UserRole", fields: [RoleID], references: [RoleID], onDelete: SetNull)
+  ReplenishedItems  replenishments[] @relation("ReplenishedByUser")
+  UndoneItems       replenishments[] @relation("UndoneByUser")
+  PullbackContacts  pullback_history[]       @relation("PullbackContactByUser")
+  PullbackSelectionChanges pullback_selection_history[] @relation("PullbackSelectionChangeByUser")
+  ReplenishmentStatusLogs  replenishment_status_log[]   @relation("ReplenishmentStatusChangedByUser")
+
+  @@index([Role])
+  @@index([RoleID])
+  @@map("users")
+}
+
+model clients {
+  ClientID           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  PartyCode          String?   @unique @db.VarChar
+  PartyName          String    @db.VarChar
+  CloseToExpiryDays  Int       @default(7)
+  IsStockPullAllowed Boolean   @default(true)
+  OverallRank        Int?
+  OverallScore       Decimal?  @db.Decimal(14, 4)
+  LastRankedAt       DateTime? @db.Timestamp(6)
+  CreatedAt          DateTime  @default(now()) @db.Timestamp(6)
+  Memos              memo[]
+  Rankings           customer_rankings[]
+  ClientStyleRankings client_style_rankings[]
+
+  @@index([PartyName])
+  @@index([OverallRank])
+  @@map("clients")
+}
+
+model stock {
+  StockID            String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  StockNo            String       @unique @db.VarChar
+  StockType          String?      @db.VarChar
+  ProductDescription String?      @db.VarChar
+  ProductType        String?      @db.VarChar
+  ProductStyle       String?      @db.VarChar
+  StoneShape         String?      @db.VarChar
+  Metal              String?      @db.VarChar
+  StonePCs           Decimal?     @db.Decimal(12, 3)
+  StoneWT            Decimal?     @db.Decimal(12, 3)
+  MetalType          String?      @db.VarChar
+  MetalWT            Decimal?     @db.Decimal(12, 3)
+  StyleNo            String?      @db.VarChar
+  BoxCode            String?      @db.VarChar
+  Location           String?      @db.VarChar
+  HoldDate           DateTime?    @db.Date
+  HoldLocation       String?      @db.VarChar
+  HoldNarration      String?      @db.VarChar
+  Size               String?      @db.VarChar
+  StoneType          String?      @db.VarChar
+  StockValue         Decimal?     @db.Decimal(12, 2)
+  MetalPurity        String?      @db.VarChar
+  HoldSoldRemark     String?      @db.VarChar
+  HoldSoldDate       DateTime?    @db.Date
+  LastSyncedAt       DateTime?    @db.Timestamp(6)
+  SyncSource         String?      @db.VarChar
+  IsMissing          Boolean      @default(false)
+  MissingNote        String?      @db.VarChar
+  UploadedAt         DateTime     @default(now()) @db.Timestamp(6)
+  MemoStockLinks memo_stock[]
+  PrimaryMemo     memo?        @relation("MemoPerStock")
+  Sales           sales[]
+
+  @@index([StyleNo])
+  @@index([StoneShape])
+  @@index([Metal])
+  @@index([MetalType])
+  @@map("stock")
+}
+
+model memo {
+  MemoID         String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  MemoNo         String       @unique @db.VarChar
+  MemoDate       DateTime     @db.Date
+  Terms          Int
+  MemoEndDate    DateTime     @db.Date
+  MemoNarration  String?      @db.VarChar
+  ClientID       String?      @db.Uuid
+  /** When set, this memo row is keyed 1:1 to a stock line (imports with no MemoNo in Excel). */
+  StockNo        String?      @unique @db.VarChar
+  IsActive       Boolean      @default(true)
+  CreatedAt      DateTime     @default(now()) @db.Timestamp(6)
+  Client         clients?     @relation(fields: [ClientID], references: [ClientID], onDelete: SetNull)
+  Stock          stock?       @relation("MemoPerStock", fields: [StockNo], references: [StockNo], onDelete: SetNull)
+  MemoStockLinks memo_stock[]
+  Sales          sales[]
+
+  @@map("memo")
+}
+
+model memo_stock {
+  MemoStockID String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  MemoID      String?   @db.Uuid
+  StockNo     String?   @db.VarChar
+  Status      String    @default("active")
+  InvoiceNo   String?   @db.VarChar
+  StatusNote  String?   @db.VarChar
+  AddedAt     DateTime  @default(now()) @db.Timestamp(6)
+  UpdatedAt   DateTime  @default(now()) @db.Timestamp(6)
+  Memo        memo?    @relation(fields: [MemoID], references: [MemoID], onDelete: Cascade)
+  Stock       stock?   @relation(fields: [StockNo], references: [StockNo], onDelete: Cascade)
+
+  @@index([MemoID])
+  @@index([StockNo])
+  @@map("memo_stock")
+}
+
+model sales {
+  SalesID       String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  InvoiceNo     String   @db.VarChar
+  InvoiceDate   DateTime @db.Date
+  PartyCode     String?  @db.VarChar
+  PartyName     String?  @db.VarChar
+  Department    String?  @db.VarChar
+  StockNo       String?  @db.VarChar
+  /** Denormalized from `stock` (or sales file mapping) for reporting / SQL without joins. */
+  StyleNo       String?  @db.VarChar
+  STShapes      String?  @db.VarChar
+  ProductType   String?  @db.VarChar
+  Metal         String?  @db.VarChar
+  StonePCs      Decimal? @db.Decimal(12, 3)
+  StoneWT       Decimal? @db.Decimal(12, 3)
+  MetalType     String?  @db.VarChar
+  MetalWT       Decimal? @db.Decimal(12, 3)
+  Size          String?  @db.VarChar
+  Remarks       String?  @db.VarChar
+  RestockNeeded Boolean  @default(false)
+  RestockType   String?  @db.VarChar
+  SaleValue     Decimal? @db.Decimal(12, 2)
+  CRAmount      Decimal? @db.Decimal(12, 2)
+  MemoID        String?  @db.Uuid
+  UploadedAt    DateTime @default(now()) @db.Timestamp(6)
+  Memo          memo?    @relation(fields: [MemoID], references: [MemoID], onDelete: SetNull)
+  Stock         stock?   @relation(fields: [StockNo], references: [StockNo], onDelete: SetNull)
+
+  @@unique([InvoiceNo, StockNo])
+  @@index([StockNo])
+  @@index([PartyCode])
+  @@index([StyleNo])
+  @@map("sales")
+}
+
+model excel_mappings {
+  MappingID          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ReportType         String    @db.VarChar
+  Mapping            Json
+  UpdatedAt          DateTime  @default(now()) @db.Timestamp(6)
+  LastImportAt       DateTime? @db.Timestamp(6)
+  LastImportInserted Int?
+  LastImportUpdated  Int?
+
+  @@unique([ReportType])
+  @@map("excel_mappings")
+}
+
+model roles {
+  RoleID      String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  RoleName    String             @unique @db.VarChar
+  Description String?            @db.VarChar
+  IsSystem    Boolean            @default(false)
+  CreatedAt   DateTime           @default(now()) @db.Timestamp(6)
+  CreatedByID String?            @db.Uuid
+  Users       users[]            @relation("UserRole")
+  Permissions role_permissions[]
+
+  @@map("roles")
+}
+
+model permissions {
+  PermissionID  String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  PermissionKey String             @unique @db.VarChar
+  Description   String?            @db.VarChar
+  Module        String             @db.VarChar
+  Roles         role_permissions[]
+
+  @@map("permissions")
+}
+
+model role_permissions {
+  RoleID       String      @db.Uuid
+  PermissionID String      @db.Uuid
+  Role         roles       @relation(fields: [RoleID], references: [RoleID], onDelete: Cascade)
+  Permission   permissions @relation(fields: [PermissionID], references: [PermissionID], onDelete: Cascade)
+
+  @@id([RoleID, PermissionID])
+  @@map("role_permissions")
+}
+
+model replenishments {
+  ReplenishmentID   String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  InvoiceNo         String    @db.VarChar
+  GroupField        String    @db.VarChar
+  GroupValue        String    @db.VarChar
+  StockNo           String    @db.VarChar
+  Type              String    @db.VarChar
+  ReplenishedBy     String    @db.Uuid
+  ReplenishedAt     DateTime  @default(now()) @db.Timestamp(6)
+  IsUndone          Boolean   @default(false)
+  UndoneBy          String?   @db.Uuid
+  UndoneAt          DateTime? @db.Timestamp(6)
+  ReplenishedByUser users     @relation("ReplenishedByUser", fields: [ReplenishedBy], references: [UserID])
+  UndoneByUser      users?    @relation("UndoneByUser", fields: [UndoneBy], references: [UserID])
+  Items             replenishment_items[]
+
+  @@index([InvoiceNo])
+  @@index([GroupValue])
+  @@index([StockNo])
+  @@map("replenishments")
+}
+
+model replenishment_items {
+  ItemID           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ReplenishmentID  String   @db.Uuid
+  InvoiceNo        String   @db.VarChar
+  StyleNo          String   @db.VarChar
+  GroupField       String   @db.VarChar
+  GroupValue       String   @db.VarChar
+  StockNo          String   @db.VarChar
+  Status           String   @db.VarChar
+  PullbackMemoID   String?  @db.Uuid
+  PullbackClientID String?  @db.Uuid
+  PullbackStatus   String?  @db.VarChar
+  FactoryOrderNote String?  @db.VarChar
+  PullbackCandidateCount Int?
+  IsActive         Boolean  @default(true)
+  FactoryOrderPlacedAt DateTime? @db.Timestamp(6)
+  FactoryOrderPlacedBy String? @db.Uuid
+  CreatedBy        String   @db.Uuid
+  CreatedAt        DateTime @default(now()) @db.Timestamp(6)
+  UpdatedAt        DateTime @default(now()) @db.Timestamp(6)
+
+  Replenishment    replenishments @relation(fields: [ReplenishmentID], references: [ReplenishmentID])
+  PullbackHistory  pullback_history[]
+  SelectionHistory pullback_selection_history[]
+  StatusLog        replenishment_status_log[]
+
+  @@index([InvoiceNo])
+  @@index([StyleNo])
+  @@index([StockNo])
+  @@map("replenishment_items")
+}
+
+model pullback_history {
+  HistoryID             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ReplenishmentItemID   String   @db.Uuid
+  ContactedAt           DateTime @default(now()) @db.Timestamp(6)
+  Channel               String   @db.VarChar
+  ContactedBy           String   @db.Uuid
+  ClientResponse        String   @db.VarChar
+  Notes                 String?  @db.Text
+
+  ReplenishmentItem replenishment_items @relation(fields: [ReplenishmentItemID], references: [ItemID])
+  ContactedByUser   users               @relation("PullbackContactByUser", fields: [ContactedBy], references: [UserID])
+
+  @@index([ReplenishmentItemID])
+  @@map("pullback_history")
+}
+
+model pullback_selection_history {
+  SelectionHistoryID  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ReplenishmentItemID String   @db.Uuid
+  PreviousStockNo     String?  @db.VarChar
+  NewStockNo          String?  @db.VarChar
+  PreviousMemoID      String?  @db.Uuid
+  NewMemoID           String?  @db.Uuid
+  Reason              String   @db.Text
+  ChangedBy           String   @db.Uuid
+  ChangedAt           DateTime @default(now()) @db.Timestamp(6)
+
+  ReplenishmentItem replenishment_items @relation(fields: [ReplenishmentItemID], references: [ItemID])
+  ChangedByUser     users               @relation("PullbackSelectionChangeByUser", fields: [ChangedBy], references: [UserID])
+
+  @@index([ReplenishmentItemID])
+  @@map("pullback_selection_history")
+}
+
+model replenishment_status_log {
+  LogID      String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ItemID     String   @db.Uuid
+  InvoiceNo  String   @db.VarChar
+  StyleNo    String   @db.VarChar
+  FromStatus String?  @db.VarChar
+  ToStatus   String   @db.VarChar
+  ChangedBy  String   @db.Uuid
+  ChangedAt  DateTime @default(now()) @db.Timestamp(6)
+  Notes      String?  @db.Text
+
+  Item          replenishment_items @relation(fields: [ItemID], references: [ItemID])
+  ChangedByUser users               @relation("ReplenishmentStatusChangedByUser", fields: [ChangedBy], references: [UserID])
+
+  @@index([ItemID])
+  @@index([InvoiceNo])
+  @@index([StyleNo])
+  @@index([ChangedAt])
+  @@map("replenishment_status_log")
+}
+
+model customer_rankings {
+  RankingID        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ClientID         String   @db.Uuid
+  /// Every row has a non-null StyleNo. Overall rank now lives on clients.OverallRank.
+  StyleNo          String   @db.VarChar
+  TotalPiecesSold  Int      @default(0)
+  TotalValueSold   Decimal  @default(0) @db.Decimal(14, 2)
+  TotalProfit      Decimal  @default(0) @db.Decimal(14, 2)
+  CombinedScore    Decimal  @default(0) @db.Decimal(14, 4)
+  /// Rank among clients within this StyleNo. Assigned by RANK() OVER (PARTITION BY StyleNo ORDER BY CombinedScore DESC).
+  StyleRank        Int?
+  LastCalculatedAt DateTime @default(now()) @db.Timestamp(6)
+  Client           clients  @relation(fields: [ClientID], references: [ClientID], onDelete: Cascade)
+
+  @@unique([ClientID, StyleNo])
+  @@index([ClientID])
+  @@index([StyleNo])
+  @@index([StyleRank])
+  @@map("customer_rankings")
+}
+
+model client_style_rankings {
+  ID               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ClientID         String   @db.Uuid
+  StyleNo          String   @db.VarChar
+  TotalPiecesSold  Int      @default(0)
+  TotalValueSold   Decimal  @default(0) @db.Decimal(14, 2)
+  TotalProfit      Decimal  @default(0) @db.Decimal(14, 2)
+  CombinedScore    Decimal  @default(0) @db.Decimal(14, 4)
+  ClientStyleRank  Int?
+  LastCalculatedAt DateTime @default(now()) @db.Timestamp(6)
+  Client           clients  @relation(fields: [ClientID], references: [ClientID], onDelete: Cascade)
+
+  @@unique([ClientID, StyleNo])
+  @@index([ClientID])
+  @@index([StyleNo])
+  @@index([ClientStyleRank])
+  @@map("client_style_rankings")
+}
+
+model system_config {
+  ConfigID    String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ConfigKey   String   @unique @db.VarChar
+  ConfigValue String   @db.Text
+  ConfigType  String   @db.VarChar
+  Description String?  @db.VarChar
+  Module      String   @db.VarChar
+  UpdatedAt   DateTime @default(now()) @db.Timestamp(6)
+  UpdatedByID String?  @db.Uuid
+
+  @@map("system_config")
+}
+
+model stock_thresholds {
+  ThresholdID String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  StyleNo     String   @unique @db.VarChar
+  MinQuantity Int
+  CreatedAt   DateTime @default(now()) @db.Timestamp(6)
+  UpdatedAt   DateTime @default(now()) @db.Timestamp(6)
+  UpdatedByID String?  @db.Uuid
+
+  @@map("stock_thresholds")
+}
+
+model stock_forecast_accuracy {
+  AccuracyID         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  StyleNo            String    @db.VarChar
+  ForecastMonth      DateTime  @db.Date
+  PredictedThreshold Int
+  ActualSold         Int?
+  Error              Int?
+  ErrorPct           Decimal?  @db.Decimal(8, 4)
+  Method1Result      Int?
+  Method2Result      Int?
+  StockClass         String    @db.VarChar
+  CreatedAt          DateTime  @default(now()) @db.Timestamp(6)
+
+  @@index([StyleNo])
+  @@index([ForecastMonth])
+  @@map("stock_forecast_accuracy")
+}

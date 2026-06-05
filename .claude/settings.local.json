@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(cd \"C:\\\\Users\\\\User\\\\Desktop\\\\DVJ ERP\"; & node \"node_modules\\\\typescript\\\\bin\\\\tsc\" --noEmit 2>&1 | Where-Object { $_ -match \"rankings|replenishment.v2|schema\" })"
+    ]
+  }
+}

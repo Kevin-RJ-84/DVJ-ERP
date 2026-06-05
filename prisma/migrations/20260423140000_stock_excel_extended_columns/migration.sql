@@ -1,0 +1,1 @@
+-- Changes applied directly to DB; this file is a placeholder so Prisma can track the migration.

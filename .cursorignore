@@ -1,0 +1,27 @@
+﻿# Secrets
+.env
+.env.local
+.env.production
+.env.development
+.env.*
+!.env.example
+
+# Build output
+.next/
+out/
+
+# Dependencies
+node_modules/
+
+# Sensitive docs
+
+docs/AUDIT.md
+docs/PERMISSIONS.md
+
+# Test fixtures
+tests/fixtures/
+
+# OS
+.DS_Store
+Thumbs.db
+*.log
