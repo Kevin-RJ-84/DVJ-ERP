@@ -168,9 +168,9 @@ function getConfirmStatus(row: ParsedRow): string {
   if (memoAlloc > 0 && stockAlloc === 0) return "memo";
   if (badge === "pullback_confirmed") return "pullback_confirmed";
   if (badge === "pb_in_progress") return "pending_pullback";
-  if (badge === "pullback_available" && !row.skippedPullback) return "pullback";
+  if (badge === "pullback_available" && !row.skippedPullback) return "pullback_available";
   if (row.skippedPullback || factoryAllocDisplay > 0) return "factory_order";
-  if (pullbackAvail > 0 && !row.skippedPullback) return "pullback";
+  if (pullbackAvail > 0 && !row.skippedPullback) return "pullback_available";
   return "factory_order";
 }
 
@@ -252,7 +252,7 @@ function buildItemDrafts(
             Type: "pullback",
             ReplenishedBy: userId,
             styleNo,
-            Status: "pullback",
+            Status: "pullback_available",
             PullbackCandidateCount: candidateCount,
           });
         }
@@ -361,7 +361,7 @@ function countByStatus(items: ItemDraft[]) {
     if (s === "stock" || s === "memo" || s === "pullback_confirmed") confirmedCount += 1;
     else if (s === "pending_pullback") pendingPullbackCount += 1;
     else if (s === "factory_order") factoryOrderCount += 1;
-    else if (s === "pullback") pullbackUnactionedCount += 1;
+    else if (s === "pullback" || s === "pullback_available") pullbackUnactionedCount += 1;
   }
 
   return { confirmedCount, pendingPullbackCount, factoryOrderCount, pullbackUnactionedCount };
@@ -459,7 +459,7 @@ export async function POST(request: NextRequest) {
           PullbackMemoID: isPullback && memo ? memo.MemoID : null,
           PullbackClientID: isPullback && memo?.ClientID ? memo.ClientID : null,
           PullbackStatus:
-            isPullback && (r.Status === "pullback" || r.Status === "pending_pullback")
+            isPullback && (r.Status === "pullback" || r.Status === "pullback_available" || r.Status === "pending_pullback")
               ? "pending"
               : isPullback && r.Status === "pullback_confirmed"
                 ? "confirmed"

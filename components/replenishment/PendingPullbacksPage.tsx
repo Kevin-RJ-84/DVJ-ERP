@@ -244,22 +244,24 @@ export function PendingPullbacksPage() {
   }, [page, applied, pillFilter]);
 
   useEffect(() => {
-    void fetchCounts();
+    queueMicrotask(() => void fetchCounts());
   }, [fetchCounts]);
 
   useEffect(() => {
-    void fetchItems();
+    queueMicrotask(() => void fetchItems());
   }, [fetchItems]);
 
   useEffect(() => {
     if (!contactModal) return;
-    setContactDraft({
-      channel: "WhatsApp",
-      response: "Accepted",
-      notes: "",
-      salesperson: "",
+    queueMicrotask(() => {
+      setContactDraft({
+        channel: "WhatsApp",
+        response: "Accepted",
+        notes: "",
+        salesperson: "",
+      });
+      setSalespersonChoices([]);
     });
-    setSalespersonChoices([]);
 
     const logs: PullbackContactLogEntry[] = [];
     if (contactModal.lastContactAt) {
@@ -272,7 +274,7 @@ export function PendingPullbacksPage() {
         loggedAt: new Date(contactModal.lastContactAt),
       });
     }
-    setContactLogs(logs);
+    queueMicrotask(() => setContactLogs(logs));
 
     let cancelled = false;
     void (async () => {
@@ -567,7 +569,7 @@ export function PendingPullbacksPage() {
                       StyleNo{sortKey === "styleNo" ? (sortDir === "asc" ? " ↑" : " ↓") : ""}
                     </button>
                   </th>
-                  <th className={thBase}>
+                  <th className={cn(thBase, "w-[11.5rem] min-w-[11.5rem] whitespace-nowrap")}>
                     <button type="button" onClick={() => toggleSort("status")} className={thBtn}>
                       Status{sortKey === "status" ? (sortDir === "asc" ? " ↑" : " ↓") : ""}
                     </button>
@@ -605,10 +607,10 @@ export function PendingPullbacksPage() {
                         <td className="px-3 py-2.5 font-mono text-[13px] text-foreground">{row.invoiceNo}</td>
                         <td className="px-3 py-2.5 text-foreground">{row.partyName}</td>
                         <td className="px-3 py-2.5 font-mono text-[13px] text-foreground">{row.styleNo}</td>
-                        <td className="px-3 py-2.5">
+                        <td className="w-[11.5rem] min-w-[11.5rem] px-3 py-2.5">
                           <span
                             className={cn(
-                              "inline-flex rounded-full px-2 py-0.5 text-[11px] font-semibold",
+                              "inline-flex whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-semibold",
                               badge.className,
                             )}
                           >

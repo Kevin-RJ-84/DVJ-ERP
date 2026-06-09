@@ -184,7 +184,7 @@ export function ExcelConfigManager() {
   }
 
   return (
-    <section className="box-border flex h-full min-h-0 w-full min-w-0 max-w-full flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm sm:p-6">
+    <section className="box-border flex w-full min-w-0 max-w-full flex-col rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm sm:p-6">
       <header className="border-b border-slate-200/70 pb-4">
         <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Import pipeline</p>
         <p className="mt-1 text-sm text-slate-600">
@@ -205,10 +205,10 @@ export function ExcelConfigManager() {
                   setNotice(null);
                   setError(null);
                 }}
-                className={`h-10 cursor-pointer rounded-full border px-4 text-sm font-semibold transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-violet-400/35 focus:ring-offset-2 ${
+                className={`h-10 cursor-pointer rounded-full border px-4 text-sm font-semibold transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-slate-400/35 focus:ring-offset-2 ${
                   reportType === type
-                    ? "border-violet-500/40 bg-violet-600 text-white hover:bg-violet-500"
-                    : "border-slate-200 bg-white text-slate-700 hover:border-violet-300 hover:text-violet-900"
+                    ? "border-slate-900 bg-slate-900 text-white hover:bg-slate-800"
+                    : "border-slate-200 bg-white text-slate-700 hover:border-slate-400 hover:text-slate-950"
                 }`}
               >
                 {REPORT_TYPE_LABELS[type]}
@@ -218,7 +218,7 @@ export function ExcelConfigManager() {
 
           <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2 md:justify-end">
             <span className="max-w-full text-xs text-slate-600">Sample: `.xlsx` or `.csv`</span>
-            <label className="inline-flex h-10 cursor-pointer items-center rounded-full border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 transition-colors duration-200 hover:border-violet-300 hover:text-violet-900">
+            <label className="inline-flex h-10 cursor-pointer items-center rounded-full border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 transition-colors duration-200 hover:border-slate-400 hover:text-slate-950">
               {isDetecting ? "Detecting..." : "Upload Sample"}
               <input
                 type="file"
@@ -232,7 +232,7 @@ export function ExcelConfigManager() {
         </div>
       </div>
 
-      <div className="mt-4 min-h-0 flex-1">
+      <div className="mt-4 flex min-w-0 flex-col">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-sm font-medium text-slate-900">
             Step 2: Map headers ({mappedCount}/{headers.length || 0} mapped)
@@ -282,7 +282,7 @@ export function ExcelConfigManager() {
                 value={dateFormat}
                 onChange={(event) => setDateFormat(event.target.value as ExcelDateFormat)}
                 disabled={isLoading}
-                className="h-10 w-full shrink-0 cursor-pointer rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none transition-colors duration-200 focus:border-violet-500/50 focus:ring-2 focus:ring-violet-500/20 sm:w-48 disabled:opacity-60"
+                className="h-10 w-full shrink-0 cursor-pointer rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none transition-colors duration-200 focus:border-slate-500/50 focus:ring-2 focus:ring-slate-500/20 sm:w-48 disabled:opacity-60"
               >
                 {EXCEL_DATE_FORMATS.map((fmt) => (
                   <option key={fmt} value={fmt}>
@@ -292,7 +292,7 @@ export function ExcelConfigManager() {
               </select>
             </div>
 
-              <div className="mt-5 relative h-full min-h-[320px] overflow-y-auto rounded-lg border border-slate-300 bg-white">
+              <div className="relative mt-5 max-h-[min(52vh,560px)] min-h-[320px] overflow-y-auto rounded-lg border border-slate-300 bg-white">
                 <table className="w-full table-fixed border-separate border-spacing-0">
                   <colgroup>
                     <col className="w-[42%]" />
@@ -325,7 +325,7 @@ export function ExcelConfigManager() {
                                 [header]: event.target.value,
                               }))
                             }
-                            className="h-10 w-full cursor-pointer rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none transition-colors duration-200 focus:border-violet-500/50 focus:ring-2 focus:ring-violet-500/20"
+                            className="h-10 w-full cursor-pointer rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none transition-colors duration-200 focus:border-slate-500/50 focus:ring-2 focus:ring-slate-500/20"
                           >
                             <option value="">Ignore this column</option>
                             {fields.map((field) => (
@@ -353,12 +353,12 @@ export function ExcelConfigManager() {
         </p>
       ) : null}
 
-      <div className="flex justify-end mt-5 pt-5">
+      <div className="mt-4 flex shrink-0 justify-end border-t border-slate-200 pt-4">
         <button
           type="button"
           onClick={handleSaveMapping}
           disabled={isSaving || isLoading || headers.length === 0 || !hasRequiredMappings}
-          className="mt-5 h-11 cursor-pointer rounded-full bg-gradient-to-r from-violet-600 to-sky-600 px-8 text-sm font-semibold uppercase tracking-[0.14em] text-white transition-colors duration-200 hover:from-violet-500 hover:to-sky-500 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+          className="h-11 cursor-pointer rounded-full bg-slate-900 px-8 text-sm font-semibold uppercase tracking-[0.14em] text-white transition-colors duration-200 hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
         >
           {isSaving ? "Saving..." : "Save Mapping"}
         </button>

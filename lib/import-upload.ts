@@ -2,6 +2,10 @@ export type ImportSnapshot = {
   lastImportAt: string | null;
   lastImportInserted: number | null;
   lastImportUpdated: number | null;
+  mappingConfigured: boolean;
+  mappedFieldCount: number;
+  requiredFields: string[];
+  missingRequiredFields: string[];
 };
 
 export type UploadImportStatusPayload = {

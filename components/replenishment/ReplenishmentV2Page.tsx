@@ -9,7 +9,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Eye,
-  FileDown,
   FileSpreadsheet,
   Loader2,
   MessageCircle,
@@ -34,12 +33,11 @@ import {
   type ReplenishmentV2RawSoldItem,
 } from "@/lib/replenishment-v2";
 import {
-  exportConfirmedReplenishmentExcel,
-  exportConfirmedReplenishmentPdf,
+  currentStatusLabel,
+  exportCurrentReplenishmentExcel,
   exportFactoryOrdersExcel,
-  exportFactoryOrdersPdf,
-  toConfirmedExportRows,
   toFactoryExportRows,
+  type CurrentReplenishmentExportRow,
   type ReplenishmentExportSourceItem,
 } from "@/lib/replenishment-exports";
 import type { DashboardSession } from "@/components/layout/dashboard-session";
@@ -256,7 +254,6 @@ function GroupByTreeMenu({
   );
 }
 
-const DATE_FMT = new Intl.DateTimeFormat("en-CA");
 const WEEKDAY_SHORT = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
 
 function toIsoDateLocal(date: Date): string {
@@ -281,6 +278,88 @@ function parseIsoDateLocal(value: string): Date | null {
     return null;
   }
   return dt;
+}
+
+function formatIsoDateForDisplay(value: string): string {
+  const parsed = parseIsoDateLocal(value);
+  if (!parsed) return "";
+  const mm = String(parsed.getMonth() + 1).padStart(2, "0");
+  const dd = String(parsed.getDate()).padStart(2, "0");
+  const yyyy = String(parsed.getFullYear());
+  return `${mm}/${dd}/${yyyy}`;
+}
+
+function parseUsDateDisplay(value: string): string | null {
+  const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(value);
+  if (!match) return null;
+  const month = Number(match[1]);
+  const day = Number(match[2]);
+  const year = Number(match[3]);
+  const date = new Date(year, month - 1, day);
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day
+  ) {
+    return null;
+  }
+  return toIsoDateLocal(date);
+}
+
+function maskUsDateInput(value: string): string {
+  const digits = value.replace(/\D/g, "").slice(0, 8);
+  if (digits.length === 0) return "";
+
+  let month = "";
+  let rest = "";
+  const firstMonthDigit = digits[0];
+  if (digits.length === 1) {
+    if (firstMonthDigit === "0" || firstMonthDigit === "1") return firstMonthDigit;
+    month = `0${firstMonthDigit}`;
+    return `${month}/`;
+  }
+
+  if (firstMonthDigit === "0") {
+    const second = digits[1];
+    month = second === "0" ? "01" : `0${Math.min(Number(second), 9)}`;
+    rest = digits.slice(2);
+  } else if (firstMonthDigit === "1") {
+    const second = digits[1];
+    month = Number(second) <= 2 ? `1${second}` : "12";
+    rest = digits.slice(2);
+  } else {
+    month = `0${firstMonthDigit}`;
+    rest = digits.slice(1);
+  }
+
+  if (rest.length === 0) return `${month}/`;
+
+  let day = "";
+  let year = "";
+  const firstDayDigit = rest[0];
+  if (rest.length === 1) {
+    if (["0", "1", "2", "3"].includes(firstDayDigit)) return `${month}/${firstDayDigit}`;
+    day = `0${firstDayDigit}`;
+    return `${month}/${day}/`;
+  }
+
+  if (firstDayDigit === "0") {
+    const second = rest[1];
+    day = second === "0" ? "01" : `0${Math.min(Number(second), 9)}`;
+    year = rest.slice(2);
+  } else if (firstDayDigit === "3") {
+    const second = rest[1];
+    day = Number(second) <= 1 ? `3${second}` : "31";
+    year = rest.slice(2);
+  } else if (firstDayDigit === "1" || firstDayDigit === "2") {
+    day = `${firstDayDigit}${rest[1]}`;
+    year = rest.slice(2);
+  } else {
+    day = `0${firstDayDigit}`;
+    year = rest.slice(1);
+  }
+
+  return `${month}/${day}${year.length > 0 ? `/${year}` : "/"}`;
 }
 
 function buildCalendarGrid(monthDate: Date) {
@@ -321,15 +400,20 @@ function DatePickerInput({
 }) {
   const selectedDate = parseIsoDateLocal(value);
   const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(formatIsoDateForDisplay(value));
+  const [editing, setEditing] = useState(false);
   const [displayMonth, setDisplayMonth] = useState<Date>(selectedDate ?? new Date());
   const wrapRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const parsed = parseIsoDateLocal(value);
     if (parsed) {
-      setDisplayMonth(parsed);
+      queueMicrotask(() => setDisplayMonth(parsed));
     }
-  }, [value]);
+    if (!editing) {
+      queueMicrotask(() => setDraft(formatIsoDateForDisplay(value)));
+    }
+  }, [value, editing]);
 
   useEffect(() => {
     function onDocClick(event: MouseEvent) {
@@ -358,11 +442,34 @@ function DatePickerInput({
       <div ref={wrapRef} className="relative">
         <input
           type="text"
-          value={value}
+          inputMode="numeric"
+          value={draft}
           placeholder="mm/dd/yyyy"
-          onChange={(e) => onChange(e.target.value)}
+          onChange={(e) => {
+            const masked = maskUsDateInput(e.target.value);
+            setDraft(masked);
+            if (!masked) {
+              onChange("");
+              return;
+            }
+            const parsed = parseUsDateDisplay(masked);
+            if (parsed) {
+              onChange(parsed);
+            } else {
+              onChange("");
+            }
+          }}
           onClick={() => setOpen(true)}
-          onFocus={() => setOpen(true)}
+          onFocus={() => {
+            setEditing(true);
+            setOpen(true);
+          }}
+          onBlur={() => {
+            setEditing(false);
+            if (!parseUsDateDisplay(draft)) {
+              setDraft(formatIsoDateForDisplay(value));
+            }
+          }}
           className="h-11 w-full rounded-full border border-border bg-card pr-11 pl-4 text-sm text-foreground outline-none transition placeholder:text-muted-foreground focus:border-foreground/25 focus:ring-2 focus:ring-ring/20"
         />
         <button
@@ -421,6 +528,7 @@ function DatePickerInput({
                     type="button"
                     onClick={() => {
                       onChange(iso);
+                      setDraft(formatIsoDateForDisplay(iso));
                       setOpen(false);
                     }}
                     className={[
@@ -441,7 +549,10 @@ function DatePickerInput({
             <div className="mt-2 flex items-center justify-between text-xs">
               <button
                 type="button"
-                onClick={() => onChange("")}
+                onClick={() => {
+                  onChange("");
+                  setDraft("");
+                }}
                 className="rounded-md px-2 py-1 text-muted-foreground hover:bg-secondary"
               >
                 Clear
@@ -450,7 +561,9 @@ function DatePickerInput({
                 type="button"
                 onClick={() => {
                   const now = new Date();
-                  onChange(toIsoDateLocal(now));
+                  const iso = toIsoDateLocal(now);
+                  onChange(iso);
+                  setDraft(formatIsoDateForDisplay(iso));
                   setDisplayMonth(now);
                   setOpen(false);
                 }}
@@ -467,37 +580,26 @@ function DatePickerInput({
 }
 
 function IconExportButtons({
-  onPdf,
   onExcel,
   disabled,
+  excelDisabled,
 }: {
-  onPdf: () => void;
   onExcel: () => void;
   disabled?: boolean;
+  excelDisabled?: boolean;
 }) {
   return (
     <div className="flex items-center gap-1.5">
       <button
         type="button"
-        disabled={disabled}
-        title="Export PDF"
-        onClick={onPdf}
-        className={cn(btnGhost, "size-9 px-0")}
-        aria-label="Export PDF"
-      >
-        <FileDown className="size-4" strokeWidth={2} />
-        <span className="sr-only">PDF</span>
-      </button>
-      <button
-        type="button"
-        disabled={disabled}
+        disabled={disabled || excelDisabled}
         title="Export Excel"
         onClick={() => void onExcel()}
-        className={cn(btnGhost, "size-9 px-0")}
+        className="inline-flex h-9 items-center gap-2 rounded-lg bg-black px-3 text-sm font-semibold text-white shadow-sm transition hover:bg-neutral-900 disabled:cursor-not-allowed disabled:opacity-40"
         aria-label="Export Excel"
       >
-        <FileSpreadsheet className="size-4" strokeWidth={2} />
-        <span className="sr-only">Excel</span>
+        <FileSpreadsheet className="size-4 text-emerald-400" strokeWidth={2.3} />
+        <span>Excel</span>
       </button>
     </div>
   );
@@ -643,7 +745,7 @@ function computeAllocationBreakdown(row: TableRow, replenPartyNorm: string) {
 }
 
 const STATUS_BADGE_WRAP =
-  "inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-xs font-semibold";
+  "inline-flex shrink-0 items-center whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-semibold";
 
 const BADGE_CONFIG = {
   memo: {
@@ -691,6 +793,25 @@ const BADGE_CONFIG = {
 } as const;
 
 type StatusBadgeType = keyof typeof BADGE_CONFIG;
+type SingleRowStatus =
+  | "memo"
+  | "stock"
+  | "pullback_available"
+  | "pullback_confirmed"
+  | "pending_pullback"
+  | "factory_order"
+  | "factory_order_placed";
+type ResultSortKey =
+  | "groupValue"
+  | "productSummary"
+  | "soldQty"
+  | "overrideQty"
+  | "status"
+  | "selectedStock"
+  | "pullbackAvailable"
+  | "factoryOrder";
+type SortDirection = "asc" | "desc";
+type ResultColumnFilters = Partial<Record<ResultSortKey, string>>;
 
 function DisabledStatusChip({ label }: { label: string }) {
   const short = label.replace(/^[^\s]+\s*/, "").trim() || label;
@@ -706,14 +827,12 @@ function computeConfirmSummary(rows: TableRow[], replenPartyNorm: string) {
   let lines = 0;
   let units = 0;
   for (const row of rows) {
-    const a = computeAllocationBreakdown(row, replenPartyNorm);
-    const factoryU = a.factoryAllocDisplay;
-    const pullU = row.skippedPullback
-      ? 0
-      : Math.max(row.confirmedPullbackItems.length, a.pullAlloc > 0 ? a.pullAlloc : 0);
-    if (factoryU + pullU > 0) {
+    if (row.overrideQty <= 0) continue;
+    const a = singleStatusAllocation(row, replenPartyNorm);
+    const rowUnits = a.memoAlloc + a.stockAlloc + a.pullAlloc + a.factoryAllocDisplay;
+    if (rowUnits > 0) {
       lines += 1;
-      units += factoryU + pullU;
+      units += rowUnits;
     }
   }
   return { lines, units };
@@ -779,6 +898,54 @@ function attachPullbackItemIds(rows: TableRow[], idMap: Map<string, string>): Ta
   });
 }
 
+const COMPLETED_STATUS_PRIORITY = [
+  "stock",
+  "memo",
+  "pullback_confirmed",
+  "factory_order_placed",
+  "factory_order",
+  "pending_pullback",
+  "pb_in_progress",
+  "pullback_available",
+  "pullback",
+] as const;
+
+function completedStatusRank(status: string) {
+  const ix = COMPLETED_STATUS_PRIORITY.indexOf(status as (typeof COMPLETED_STATUS_PRIORITY)[number]);
+  return ix === -1 ? COMPLETED_STATUS_PRIORITY.length : ix;
+}
+
+function applyCompletedMetadata(
+  rows: TableRow[],
+  payload: ReplenishmentV2ApiPayload | null,
+  groupBy: ReplenishmentGroupField,
+): TableRow[] {
+  const completedItems = payload?.raw.completedItems ?? [];
+  if (completedItems.length === 0) return rows;
+
+  return rows.map((row) => {
+    const matches = completedItems
+      .filter(
+        (item) =>
+          item.groupField === groupBy &&
+          item.groupValue === row.groupValue &&
+          row.invoiceNos.includes(item.invoiceNo),
+      )
+      .sort((a, b) => completedStatusRank(a.status) - completedStatusRank(b.status));
+    const first = matches[0];
+    if (!first) return row;
+    const stockItem = matches.find((item) => item.status === "stock" && item.stockNo && item.stockNo !== "—");
+    const candidateCount =
+      matches.find((item) => item.pullbackCandidateCount != null)?.pullbackCandidateCount ?? null;
+    return {
+      ...row,
+      savedStatus: first.status,
+      savedStockNo: stockItem?.stockNo ?? null,
+      savedPullbackCandidateCount: candidateCount,
+    };
+  });
+}
+
 function lastLogForStock(row: TableRow, stockNo: string): PullbackContactLogEntry | null {
   const bucket = row.pullbackContactLogs.find((b) => b.stockNo === stockNo);
   if (!bucket || bucket.logs.length === 0) return null;
@@ -815,6 +982,125 @@ function derivePullbackBadgeState(
   });
   if (allAccepted) return "pullback_confirmed";
   return "pb_in_progress";
+}
+
+function deriveSingleRowStatus(row: TableRow, replenPartyNorm: string): SingleRowStatus {
+  const saved = row.savedStatus;
+  if (saved === "memo" || saved === "stock" || saved === "pullback_confirmed" || saved === "factory_order_placed") {
+    return saved;
+  }
+  if (saved === "pending_pullback" || saved === "pb_in_progress") {
+    return "pending_pullback";
+  }
+
+  const allocation = computeAllocationBreakdown(row, replenPartyNorm);
+  if (allocation.clientMemoQty > 0) {
+    return "memo";
+  }
+  if (row.selectedWarehouseStockNos.size > 0) {
+    return "stock";
+  }
+
+  const pullbackBadge = derivePullbackBadgeState(row, replenPartyNorm);
+  if (pullbackBadge === "pullback_confirmed") {
+    return "pullback_confirmed";
+  }
+  if (pullbackBadge === "pb_in_progress") {
+    return "pending_pullback";
+  }
+  if (!row.skippedPullback && allocation.pullbackAvail > 0) {
+    return "pullback_available";
+  }
+
+  return "factory_order";
+}
+
+function singleStatusAllocation(row: TableRow, replenPartyNorm: string) {
+  const base = computeAllocationBreakdown(row, replenPartyNorm);
+  const status = deriveSingleRowStatus(row, replenPartyNorm);
+  const isPullbackStatus =
+    status === "pullback_available" || status === "pullback_confirmed" || status === "pending_pullback";
+
+  return {
+    status,
+    memoAlloc: status === "memo" ? Math.min(row.overrideQty, base.clientMemoQty) : 0,
+    stockAlloc: status === "stock" ? Math.min(row.overrideQty, row.selectedWarehouseStockNos.size) : 0,
+    pullAlloc: isPullbackStatus
+      ? Math.max(row.confirmedPullbackItems.length, Math.min(row.overrideQty, base.pullbackAvail))
+      : 0,
+    factoryAllocDisplay: status === "factory_order" ? row.overrideQty : 0,
+    pullbackAvail: base.pullbackAvail,
+    clientMemoQty: base.clientMemoQty,
+  };
+}
+
+function shouldShowStockPills(row: TableRow, status: SingleRowStatus, ui: RowUiState) {
+  if (ui.isDisabled || row.warehousePillStockNos.length === 0) return false;
+  return status === "stock" || status === "pullback_available" || status === "factory_order";
+}
+
+function selectedStockText(row: TableRow) {
+  return [...row.selectedWarehouseStockNos].sort((a, b) => a.localeCompare(b)).join(", ");
+}
+
+function resultSortValue(row: TableRow, key: ResultSortKey, replenPartyNorm: string): string | number {
+  switch (key) {
+    case "groupValue":
+      return row.groupValue;
+    case "productSummary":
+      return row.productSummary;
+    case "soldQty":
+      return row.soldQty;
+    case "overrideQty":
+      return row.overrideQty;
+    case "status":
+      return currentStatusLabel(deriveSingleRowStatus(row, replenPartyNorm));
+    case "selectedStock":
+      return selectedStockText(row);
+    case "pullbackAvailable":
+      return row.pullbackAvailable;
+    case "factoryOrder":
+      return row.factoryOrder;
+  }
+}
+
+function resultFilterValue(row: TableRow, key: ResultSortKey, replenPartyNorm: string): string {
+  const value = resultSortValue(row, key, replenPartyNorm);
+  return typeof value === "number" ? String(value) : value.trim() || "—";
+}
+
+function compareResultRows(a: TableRow, b: TableRow, key: ResultSortKey, direction: SortDirection, replenPartyNorm: string) {
+  const aValue = resultSortValue(a, key, replenPartyNorm);
+  const bValue = resultSortValue(b, key, replenPartyNorm);
+  const multiplier = direction === "asc" ? 1 : -1;
+  if (typeof aValue === "number" && typeof bValue === "number") {
+    return (aValue - bValue) * multiplier;
+  }
+  const primary = String(aValue).localeCompare(String(bValue), undefined, {
+    numeric: true,
+    sensitivity: "base",
+  });
+  if (primary !== 0) return primary * multiplier;
+  return a.groupValue.localeCompare(b.groupValue, undefined, { numeric: true, sensitivity: "base" });
+}
+
+function resultRowMatchesColumnFilters(
+  row: TableRow,
+  filters: ResultColumnFilters,
+  replenPartyNorm: string,
+) {
+  for (const [rawKey, filterValue] of Object.entries(filters)) {
+    if (!filterValue) continue;
+    const key = rawKey as ResultSortKey;
+    if (resultFilterValue(row, key, replenPartyNorm) !== filterValue) return false;
+  }
+  return true;
+}
+
+function buildResultFilterOptions(rows: TableRow[], key: ResultSortKey, replenPartyNorm: string) {
+  return [...new Set(rows.map((row) => resultFilterValue(row, key, replenPartyNorm)))]
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
 }
 
 function getFactoryOrderBadgeType(
@@ -859,11 +1145,11 @@ function deriveRowUiState(row: TableRow, replenPartyNorm: string): RowUiState {
     }
   }
 
-  const badge = derivePullbackBadgeState(row, replenPartyNorm);
-  if (badge === "pb_in_progress") {
+  const singleStatus = deriveSingleRowStatus(row, replenPartyNorm);
+  if (singleStatus === "pending_pullback") {
     return { isDisabled: false, disabledChip: null, mode: "locked_selection" };
   }
-  if (badge === "pullback_available" || (row.skippedPullback && candidateCount > 0)) {
+  if (singleStatus === "pullback_available" || (singleStatus === "factory_order" && row.skippedPullback && candidateCount > 0)) {
     return { isDisabled: false, disabledChip: null, mode: "full_recalc" };
   }
 
@@ -884,67 +1170,147 @@ type PendingInvoiceRow = {
   daysSinceSold: number;
 };
 
-function ExportDropdown({
+function ExcelExportButton({
   label,
-  onPdf,
   onExcel,
   disabled,
 }: {
   label: string;
-  onPdf: () => void;
   onExcel: () => void;
   disabled?: boolean;
 }) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      title={label}
+      onClick={() => void onExcel()}
+      className="inline-flex h-10 shrink-0 items-center gap-2 rounded-lg bg-black px-3 text-sm font-semibold text-white shadow-sm transition hover:bg-neutral-900 disabled:cursor-not-allowed disabled:opacity-40"
+      aria-label={label}
+    >
+      <FileSpreadsheet className="size-4 text-emerald-400" strokeWidth={2.3} />
+      <span>Excel</span>
+    </button>
+  );
+}
+
+function ResultColumnMenuTh({
+  label,
+  sortKey,
+  activeKey,
+  direction,
+  onSortAsc,
+  onSortDesc,
+  filterValue,
+  filterOptions,
+  onFilterChange,
+  className,
+}: {
+  label: string;
+  sortKey: ResultSortKey;
+  activeKey: ResultSortKey;
+  direction: SortDirection;
+  onSortAsc: (key: ResultSortKey) => void;
+  onSortDesc: (key: ResultSortKey) => void;
+  filterValue?: string;
+  filterOptions: string[];
+  onFilterChange: (key: ResultSortKey, value: string | null) => void;
+  className: string;
+}) {
+  const active = activeKey === sortKey;
+  const filtered = Boolean(filterValue);
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement | null>(null);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!open) return;
-    function onDoc(e: MouseEvent) {
-      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    function onDocMouseDown(event: MouseEvent) {
+      if (!wrapRef.current) return;
+      if (event.target instanceof Node && !wrapRef.current.contains(event.target)) {
+        setOpen(false);
+      }
     }
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
+    document.addEventListener("mousedown", onDocMouseDown);
+    return () => document.removeEventListener("mousedown", onDocMouseDown);
   }, [open]);
 
   return (
-    <div ref={ref} className="relative">
-      <button
-        type="button"
-        disabled={disabled}
-        onClick={() => setOpen((o) => !o)}
-        className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-lg border border-border bg-card px-3 text-sm font-medium text-foreground shadow-sm transition hover:bg-secondary disabled:cursor-not-allowed disabled:opacity-40"
-      >
-        {label}
-        <ChevronDown className="size-4" />
-      </button>
-      {open ? (
-        <div className="absolute right-0 z-30 mt-1 min-w-[10rem] rounded-lg border border-border bg-card py-1 shadow-lg">
-          <button
-            type="button"
-            className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-secondary"
-            onClick={() => {
-              setOpen(false);
-              onPdf();
-            }}
-          >
-            <FileDown className="size-4" />
-            PDF
-          </button>
-          <button
-            type="button"
-            className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-secondary"
-            onClick={() => {
-              setOpen(false);
-              onExcel();
-            }}
-          >
-            <FileSpreadsheet className="size-4" />
-            Excel
-          </button>
-        </div>
-      ) : null}
-    </div>
+    <th className={className} aria-sort={active ? (direction === "asc" ? "ascending" : "descending") : "none"}>
+      <div ref={wrapRef} className="relative inline-flex">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="inline-flex items-center gap-1.5 rounded-md text-left transition hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/25"
+        >
+          <span>{label}</span>
+          <span className={cn("text-[10px]", active || filtered ? "text-foreground" : "text-muted-foreground/60")}>
+            {active ? (direction === "asc" ? "▲" : "▼") : filtered ? "●" : "▾"}
+          </span>
+        </button>
+        {open ? (
+          <div className="absolute left-0 top-full z-40 mt-2 w-56 rounded-xl border border-border bg-card p-2 text-xs normal-case tracking-normal text-foreground shadow-xl">
+            <button
+              type="button"
+              className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left font-medium hover:bg-secondary"
+              onClick={() => {
+                onSortAsc(sortKey);
+                setOpen(false);
+              }}
+            >
+              <span>Sort A to Z</span>
+              <span className="text-muted-foreground">↑</span>
+            </button>
+            <button
+              type="button"
+              className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left font-medium hover:bg-secondary"
+              onClick={() => {
+                onSortDesc(sortKey);
+                setOpen(false);
+              }}
+            >
+              <span>Sort Z to A</span>
+              <span className="text-muted-foreground">↓</span>
+            </button>
+            <div className="my-2 border-t border-border" />
+            <label className="mb-1 block px-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Filter
+            </label>
+            {filtered ? (
+              <p className="mb-1 truncate px-1 text-[11px] text-muted-foreground" title={filterValue}>
+                Current: {filterValue}
+              </p>
+            ) : null}
+            <select
+              value={filterValue ?? ""}
+              onChange={(event) => {
+                onFilterChange(sortKey, event.target.value || null);
+                setOpen(false);
+              }}
+              className="h-9 w-full rounded-lg border border-border bg-card px-2 text-xs text-foreground outline-none focus:border-foreground/25 focus:ring-2 focus:ring-ring/20"
+            >
+              <option value="">All</option>
+              {filterOptions.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+            {filtered ? (
+              <button
+                type="button"
+                className="mt-2 w-full rounded-lg px-2.5 py-2 text-left font-medium text-muted-foreground hover:bg-secondary hover:text-foreground"
+                onClick={() => {
+                  onFilterChange(sortKey, null);
+                  setOpen(false);
+                }}
+              >
+                Clear this filter
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+    </th>
   );
 }
 
@@ -992,41 +1358,28 @@ function ReplenishmentStatusCell({
   const [restoreOpen, setRestoreOpen] = useState(false);
 
   const allocation = computeAllocationBreakdown(row, replenPartyNorm);
-  const { memoAlloc, stockAlloc, factoryAllocDisplay, pullbackAvail } = allocation;
-
-  const pullbackBadge = derivePullbackBadgeState(row, replenPartyNorm);
-  /** Planned remainder assuming external pullback fills up to pullbackAvail — drives status badges vs pullback. */
-  const factoryBadge =
-    factoryAllocDisplay > 0 ? getFactoryOrderBadgeType(row, replenPartyNorm) : null;
-
-  const badges: { type: StatusBadgeType; onClick?: () => void }[] = [];
-
-  if (memoAlloc > 0) badges.push({ type: "memo" });
-  if (stockAlloc > 0) badges.push({ type: "stock" });
-  if (!row.skippedPullback && pullbackBadge) {
-    badges.push({
-      type: pullbackBadge,
-      onClick:
-        pullbackBadge === "pullback_available"
-          ? () => {
-              setRestoreOpen(false);
-              setSkipOpen(true);
-            }
-          : undefined,
-    });
-  }
-  if (factoryBadge) {
-    badges.push({
-      type: factoryBadge,
-      onClick:
-        factoryBadge === "factory_order_skippable"
-          ? () => {
-              setSkipOpen(false);
-              setRestoreOpen(true);
-            }
-          : undefined,
-    });
-  }
+  const { pullbackAvail } = allocation;
+  const singleStatus = deriveSingleRowStatus(row, replenPartyNorm);
+  const badge =
+    singleStatus === "pending_pullback"
+      ? "pb_in_progress"
+      : singleStatus === "factory_order"
+        ? getFactoryOrderBadgeType(row, replenPartyNorm)
+        : singleStatus === "factory_order_placed"
+          ? "factory_order_final"
+          : singleStatus;
+  const onBadgeClick =
+    singleStatus === "pullback_available"
+      ? () => {
+          setRestoreOpen(false);
+          setSkipOpen(true);
+        }
+      : badge === "factory_order_skippable"
+        ? () => {
+            setSkipOpen(false);
+            setRestoreOpen(true);
+          }
+        : undefined;
 
   function applySkipPullback() {
     setRows((prev) =>
@@ -1067,16 +1420,10 @@ function ReplenishmentStatusCell({
     return () => document.removeEventListener("keydown", onKey);
   }, [skipOpen, restoreOpen]);
 
-  if (badges.length === 0) {
-    return <span className="text-muted-foreground">—</span>;
-  }
-
   return (
     <>
       <div className="flex max-w-[14rem] flex-wrap gap-1">
-        {badges.map(({ type, onClick }) => (
-          <StatusBadge key={type} type={type} onClick={onClick} />
-        ))}
+        <StatusBadge type={badge} onClick={onBadgeClick} />
       </div>
       {skipOpen ? (
         <div
@@ -1270,6 +1617,98 @@ type InvoiceSearchSummary = {
   lineCount: number;
 };
 
+type StyleUploadSummary = {
+  fileName: string;
+  rowCount: number;
+};
+
+function styleUploadGroupKey(styleNo: string | null, metalType: string | null) {
+  return `${styleNo?.trim() || "(blank)"} · ${metalType?.trim() || "(blank)"}`;
+}
+
+function regroupStyleUpload(payload: ReplenishmentV2ApiPayload): TableRow[] {
+  const soldByGroup = new Map<string, ReplenishmentV2ApiPayload["raw"]["soldItems"]>();
+  for (const item of payload.raw.soldItems) {
+    const key = styleUploadGroupKey(item.groupValues.StyleNo, item.groupValues.MetalType);
+    const current = soldByGroup.get(key) ?? [];
+    current.push(item);
+    soldByGroup.set(key, current);
+  }
+
+  return [...soldByGroup.entries()]
+    .map(([groupValue, soldInGroup]) => {
+      const first = soldInGroup[0];
+      const styleNo = first?.groupValues.StyleNo?.trim() || null;
+      const metalType = first?.groupValues.MetalType?.trim() || null;
+      const soldQty = soldInGroup.length;
+      const matchesUploadLine = (value: { groupValues: Record<ReplenishmentGroupField, string | null> }) =>
+        normalizeGroupValue(value.groupValues.StyleNo) === normalizeGroupValue(styleNo) &&
+        normalizeMetalType(value.groupValues.MetalType) === normalizeMetalType(metalType);
+
+      const inWarehouseItems = payload.raw.inWarehouseItems
+        .filter(matchesUploadLine)
+        .map((item) => ({
+          StockNo: item.stockNo,
+          ProductDescription: item.productDescription,
+          Location: item.location,
+          BoxCode: item.boxCode,
+          StyleNo: item.groupValues.StyleNo,
+          StoneShape: item.groupValues.StoneShape,
+          Metal: item.groupValues.Metal,
+          MetalType: item.groupValues.MetalType,
+          ProductType: item.groupValues.ProductType,
+          ProductStyle: item.groupValues.ProductStyle,
+        }));
+      const pullbackItems = payload.raw.pullbackItems
+        .filter(matchesUploadLine)
+        .sort((a, b) => {
+          const aOverall = a.overallRank ?? -Infinity;
+          const bOverall = b.overallRank ?? -Infinity;
+          if (aOverall !== bOverall) return bOverall - aOverall;
+          return (b.styleRank ?? -Infinity) - (a.styleRank ?? -Infinity);
+        })
+        .map((item) => ({
+          StockNo: item.stockNo,
+          ProductDescription: item.productDescription,
+          PartyName: item.partyName,
+          MemoNo: item.memoNo,
+          MemoEndDate: item.memoEndDate,
+          CloseToExpiryDays: item.closeToExpiryDays,
+          OverallRank: item.overallRank,
+          StyleRank: item.styleRank,
+          StyleNo: item.groupValues.StyleNo,
+          StoneShape: item.groupValues.StoneShape,
+          Metal: item.groupValues.Metal,
+          MetalType: item.groupValues.MetalType,
+          ProductType: item.groupValues.ProductType,
+          ProductStyle: item.groupValues.ProductStyle,
+        }));
+      const warehousePool = inWarehouseItems.map((item) => item.StockNo);
+      const warehousePillStockNos = pickRandom(warehousePool, Math.min(soldQty, warehousePool.length));
+
+      return {
+        groupValue,
+        styleRank: null,
+        soldQty,
+        overrideQty: soldQty,
+        inWarehouse: inWarehouseItems.length,
+        pullbackAvailable: pullbackItems.length,
+        factoryOrder: Math.max(0, soldQty - warehousePillStockNos.length),
+        inWarehouseItems,
+        pullbackItems,
+        productSummary: `Style: ${styleNo ?? "—"} · Metal type: ${metalType ?? "—"}`,
+        warehousePillStockNos,
+        selectedWarehouseStockNos: new Set(warehousePillStockNos),
+        invoiceNos: ["STYLE-UPLOAD"],
+        confirmedPullbackItems: [],
+        pullbackChangeHistory: [],
+        pullbackContactLogs: [],
+        skippedPullback: false,
+      };
+    })
+    .sort((a, b) => a.groupValue.localeCompare(b.groupValue));
+}
+
 function sessionFromJwtPayload(
   permissions: string[],
   role: "admin" | "member",
@@ -1293,7 +1732,7 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
   const [session, setSession] = useState<DashboardSession | null>(sessionProp);
 
   useEffect(() => {
-    setSession(sessionProp);
+    queueMicrotask(() => setSession(sessionProp));
   }, [sessionProp]);
 
   useEffect(() => {
@@ -1322,9 +1761,11 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
   const showExportConfirmed = canExportConfirmed(session);
   const showExportFactoryOrders = canExportFactoryOrders(session);
   const [mainTab, setMainTab] = useState<"search" | "history">("search");
-  const [searchMode, setSearchMode] = useState<"client" | "invoice">("client");
+  const [searchMode, setSearchMode] = useState<"client" | "invoice" | "styleUpload">("client");
   const [invoiceNoInput, setInvoiceNoInput] = useState("");
   const [invoiceSearchSummary, setInvoiceSearchSummary] = useState<InvoiceSearchSummary | null>(null);
+  const [styleUploadFile, setStyleUploadFile] = useState<File | null>(null);
+  const [styleUploadSummary, setStyleUploadSummary] = useState<StyleUploadSummary | null>(null);
   const [clientSearch, setClientSearch] = useState("");
   const [clientId, setClientId] = useState("");
   const [clientSuggestions, setClientSuggestions] = useState<ClientOption[]>([]);
@@ -1376,10 +1817,12 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
   const [toast, setToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [repPage, setRepPage] = useState(0);
   const [repPageSize, setRepPageSize] = useState<number>(25);
-  const [repJumpDraft, setRepJumpDraft] = useState("1");
   const [clientHighlightIndex, setClientHighlightIndex] = useState(0);
   const clientSuggestRef = useRef<HTMLDivElement | null>(null);
   const [showCompleted, setShowCompleted] = useState(false);
+  const [resultColumnFilters, setResultColumnFilters] = useState<ResultColumnFilters>({});
+  const [resultSortBy, setResultSortBy] = useState<ResultSortKey>("groupValue");
+  const [resultSortDir, setResultSortDir] = useState<SortDirection>("asc");
   const [showPendingDrawer, setShowPendingDrawer] = useState(false);
   const [pendingInvoiceTotal, setPendingInvoiceTotal] = useState(0);
   const [pendingInvoices, setPendingInvoices] = useState<PendingInvoiceRow[]>([]);
@@ -1393,7 +1836,7 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
   const [exportSnapshot, setExportSnapshot] = useState<ReplenishmentExportSourceItem[]>([]);
 
   useEffect(() => {
-    setClientHighlightIndex(0);
+    queueMicrotask(() => setClientHighlightIndex(0));
   }, [clientSuggestions]);
 
   useEffect(() => {
@@ -1416,13 +1859,15 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
 
   useEffect(() => {
     if (!contactLogModal) return;
-    setContactDraft({
-      channel: "WhatsApp",
-      response: "Accepted",
-      notes: "",
-      salesperson: "",
+    queueMicrotask(() => {
+      setContactDraft({
+        channel: "WhatsApp",
+        response: "Accepted",
+        notes: "",
+        salesperson: "",
+      });
+      setSalespersonChoices([]);
     });
-    setSalespersonChoices([]);
     let cancelled = false;
     (async () => {
       try {
@@ -1458,9 +1903,11 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
   useEffect(() => {
     const inv = searchParams.get("invoiceNo")?.trim();
     if (!inv) return;
-    setSearchMode("invoice");
-    setInvoiceNoInput(inv);
-    setMainTab("search");
+    queueMicrotask(() => {
+      setSearchMode("invoice");
+      setInvoiceNoInput(inv);
+      setMainTab("search");
+    });
   }, [searchParams]);
 
   useEffect(() => {
@@ -1510,9 +1957,12 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
     return clientSearch.trim();
   }, [clientId, clientSearch, clientSuggestions]);
 
-  const exportDisplayName = invoiceSearchSummary?.partyName ?? selectedClientName;
+  const exportDisplayName = styleUploadSummary ? "By Style" : (invoiceSearchSummary?.partyName ?? selectedClientName);
 
-  const replenPartyKey = useMemo(() => normalizeReplenParty(exportDisplayName), [exportDisplayName]);
+  const replenPartyKey = useMemo(
+    () => normalizeReplenParty(searchMode === "styleUpload" ? "" : exportDisplayName),
+    [exportDisplayName, searchMode],
+  );
 
   const finalizeRowsForParty = useCallback((list: TableRow[], partyKey: string) => {
     return list.map((row) => ({
@@ -1605,21 +2055,16 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
     };
   }, [pullbackDrawer, rows, replenPartyKey]);
 
-  const hasAnyGreenPill = rows.some((row) => row.selectedWarehouseStockNos.size > 0);
-
   const canConfirmReplenishment = useMemo(
     () =>
+      searchMode !== "styleUpload" &&
       rows.some((row) => {
-        const a = computeAllocationBreakdown(row, replenPartyKey);
-        return (
-          row.selectedWarehouseStockNos.size > 0 ||
-          row.confirmedPullbackItems.length > 0 ||
-          a.memoAlloc > 0 ||
-          a.factoryAllocDisplay > 0 ||
-          (a.pullAlloc > 0 && !row.skippedPullback)
+        if (row.overrideQty <= 0) return false;
+        return ["memo", "stock", "pullback_available", "pullback_confirmed", "pending_pullback", "factory_order"].includes(
+          deriveSingleRowStatus(row, replenPartyKey),
         );
       }),
-    [rows, replenPartyKey],
+    [rows, replenPartyKey, searchMode],
   );
 
   const confirmSummary = useMemo(
@@ -1627,11 +2072,16 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
     [rows, replenPartyKey],
   );
 
-  const visibleRows = useMemo(
-    () =>
-      showCompleted
-        ? rows
-        : rows.filter((row) => !deriveRowUiState(row, replenPartyKey).isDisabled),
+  const visibleRows = useMemo(() => {
+    const filtered = rows.filter((row) => {
+      if (!showCompleted && deriveRowUiState(row, replenPartyKey).isDisabled) return false;
+      return resultRowMatchesColumnFilters(row, resultColumnFilters, replenPartyKey);
+    });
+    return [...filtered].sort((a, b) => compareResultRows(a, b, resultSortBy, resultSortDir, replenPartyKey));
+  }, [rows, showCompleted, replenPartyKey, resultColumnFilters, resultSortBy, resultSortDir]);
+
+  const filterSourceRows = useMemo(
+    () => (showCompleted ? rows : rows.filter((row) => !deriveRowUiState(row, replenPartyKey).isDisabled)),
     [rows, showCompleted, replenPartyKey],
   );
 
@@ -1642,18 +2092,23 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
   const repEndRow = Math.min((safeRepPage + 1) * repPageSize, visibleRows.length);
 
   useEffect(() => {
-    setRepPage((p) => Math.min(p, Math.max(0, repTotalPages - 1)));
+    queueMicrotask(() => setRepPage((p) => Math.min(p, Math.max(0, repTotalPages - 1))));
   }, [repTotalPages]);
 
-  useEffect(() => {
-    setRepJumpDraft(String(safeRepPage + 1));
-  }, [safeRepPage]);
+  function setResultSort(key: ResultSortKey, direction: SortDirection) {
+    setResultSortBy(key);
+    setResultSortDir(direction);
+    setRepPage(0);
+  }
 
-  function applyRepJump() {
-    const n = parseInt(repJumpDraft.trim(), 10);
-    if (!Number.isFinite(n)) return;
-    const target = Math.min(Math.max(1, n), repTotalPages);
-    setRepPage(target - 1);
+  function setResultColumnFilter(key: ResultSortKey, value: string | null) {
+    setResultColumnFilters((prev) => {
+      const next = { ...prev };
+      if (value) next[key] = value;
+      else delete next[key];
+      return next;
+    });
+    setRepPage(0);
   }
 
   function selectClientSuggestion(client: ClientOption) {
@@ -1692,72 +2147,76 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
     }
   }
 
-  async function handleSearch() {
-    if (searchMode === "invoice") {
-      const inv = invoiceNoInput.trim();
-      if (!inv) {
-        setError("Enter an invoice number.");
-        setHasSearched(false);
-        return;
-      }
-      setHasSearched(true);
-      setLoading(true);
-      setError(null);
-      setConfirmed(false);
-      setToast(null);
-      setInvoiceSearchSummary(null);
-      try {
-        const params = new URLSearchParams({
-          invoiceNo: inv,
-          groupBy,
-          includeRaw: "1",
-        });
-        const res = await fetch(`/api/replenishment/v2?${params.toString()}`);
-        const payload = (await res.json()) as ReplenishmentV2ApiPayload & {
-          message?: string;
-          invoiceSearchSummary?: InvoiceSearchSummary;
-        };
-        if (!res.ok) {
-          setError(payload.message ?? "Search failed.");
-          return;
-        }
-        setRawPayload(payload);
-        const summary = payload.invoiceSearchSummary;
-        const allocPk = normalizeReplenParty(summary?.partyName ?? "");
-        const grouped = finalizeRowsForParty(regroup(payload, groupBy), allocPk);
-        const idMap = await fetchPullbackItemIdByInvoiceStyle();
-        let nextRows = attachPullbackItemIds(grouped, idMap);
-        const deepLinkItemId = searchParams.get("pullbackItemId")?.trim();
-        if (deepLinkItemId && summary) {
-          nextRows = nextRows.map((row) => {
-            if (!row.invoiceNos.includes(summary.invoiceNo)) return row;
-            const ids = { ...(row.savedPullbackItemIdByStock ?? {}) };
-            if (row.confirmedPullbackItems.length > 0) {
-              for (const pb of row.confirmedPullbackItems) {
-                ids[pb.StockNo] = deepLinkItemId;
-              }
-            } else {
-              ids.__item = deepLinkItemId;
-            }
-            return { ...row, savedPullbackItemIdByStock: ids };
-          });
-        }
-        setRows(nextRows);
-        setRepPage(0);
-        if (summary) {
-          setInvoiceSearchSummary(summary);
-          const d = summary.invoiceDate.slice(0, 10);
-          setFromDate(d);
-          setToDate(d);
-        }
-      } catch {
-        setError("Unexpected network error.");
-      } finally {
-        setLoading(false);
-      }
+  async function runInvoiceSearch() {
+    const inv = invoiceNoInput.trim();
+    if (!inv) {
+      setError("Enter an invoice number.");
+      setHasSearched(false);
       return;
     }
+    setHasSearched(true);
+    setLoading(true);
+    setError(null);
+    setConfirmed(false);
+    setToast(null);
+    setInvoiceSearchSummary(null);
+    setStyleUploadSummary(null);
+    try {
+      const params = new URLSearchParams({
+        invoiceNo: inv,
+        groupBy,
+        includeRaw: "1",
+      });
+      const res = await fetch(`/api/replenishment/v2?${params.toString()}`);
+      const payload = (await res.json()) as ReplenishmentV2ApiPayload & {
+        message?: string;
+        invoiceSearchSummary?: InvoiceSearchSummary;
+      };
+      if (!res.ok) {
+        setError(payload.message ?? "Search failed.");
+        return;
+      }
+      setRawPayload(payload);
+      const summary = payload.invoiceSearchSummary;
+      const allocPk = normalizeReplenParty(summary?.partyName ?? "");
+      const grouped = applyCompletedMetadata(
+        finalizeRowsForParty(regroup(payload, groupBy), allocPk),
+        payload,
+        groupBy,
+      );
+      const idMap = await fetchPullbackItemIdByInvoiceStyle();
+      let nextRows = attachPullbackItemIds(grouped, idMap);
+      const deepLinkItemId = searchParams.get("pullbackItemId")?.trim();
+      if (deepLinkItemId && summary) {
+        nextRows = nextRows.map((row) => {
+          if (!row.invoiceNos.includes(summary.invoiceNo)) return row;
+          const ids = { ...(row.savedPullbackItemIdByStock ?? {}) };
+          if (row.confirmedPullbackItems.length > 0) {
+            for (const pb of row.confirmedPullbackItems) {
+              ids[pb.StockNo] = deepLinkItemId;
+            }
+          } else {
+            ids.__item = deepLinkItemId;
+          }
+          return { ...row, savedPullbackItemIdByStock: ids };
+        });
+      }
+      setRows(nextRows);
+      setRepPage(0);
+      if (summary) {
+        setInvoiceSearchSummary(summary);
+        const d = summary.invoiceDate.slice(0, 10);
+        setFromDate(d);
+        setToDate(d);
+      }
+    } catch {
+      setError("Unexpected network error.");
+    } finally {
+      setLoading(false);
+    }
+  }
 
+  async function runClientSearch(includeCompletedRows: boolean) {
     if (!clientId) {
       setError("Type at least 3 letters to match a client.");
       setHasSearched(false);
@@ -1775,6 +2234,7 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
     setConfirmed(false);
     setToast(null);
     setInvoiceSearchSummary(null);
+    setStyleUploadSummary(null);
     try {
       const params = new URLSearchParams({
         clientId,
@@ -1783,6 +2243,9 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
         groupBy,
         includeRaw: "1",
       });
+      if (includeCompletedRows) {
+        params.set("includeCompleted", "1");
+      }
       const res = await fetch(`/api/replenishment/v2?${params.toString()}`);
       const payload = (await res.json()) as ReplenishmentV2ApiPayload & { message?: string };
       if (!res.ok) {
@@ -1790,7 +2253,7 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
         return;
       }
       setRawPayload(payload);
-      const grouped = finalizeRows(regroup(payload, groupBy));
+      const grouped = applyCompletedMetadata(finalizeRows(regroup(payload, groupBy)), payload, groupBy);
       const idMap = await fetchPullbackItemIdByInvoiceStyle();
       setRows(attachPullbackItemIds(grouped, idMap));
       setRepPage(0);
@@ -1801,10 +2264,67 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
     }
   }
 
+  async function runStyleUploadSearch() {
+    if (!styleUploadFile) {
+      setError("Upload an Excel or CSV file with StyleNo and MetalType columns.");
+      setHasSearched(false);
+      return;
+    }
+
+    setHasSearched(true);
+    setLoading(true);
+    setError(null);
+    setConfirmed(false);
+    setToast(null);
+    setInvoiceSearchSummary(null);
+    try {
+      const formData = new FormData();
+      formData.set("file", styleUploadFile);
+      const res = await fetch("/api/replenishment/style-upload", {
+        method: "POST",
+        body: formData,
+        credentials: "include",
+      });
+      const payload = (await res.json()) as (ReplenishmentV2ApiPayload & { uploadedCount?: number; message?: string });
+      if (!res.ok) {
+        setError(payload.message ?? "Style upload failed.");
+        return;
+      }
+      setRawPayload(payload);
+      setGroupBy("StyleNo");
+      setStyleUploadSummary({ fileName: styleUploadFile.name, rowCount: payload.uploadedCount ?? payload.raw.soldItems.length });
+      setRows(finalizeRowsForParty(regroupStyleUpload(payload), ""));
+      setRepPage(0);
+    } catch {
+      setError("Unexpected network error.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleSearch() {
+    if (searchMode === "invoice") {
+      await runInvoiceSearch();
+      return;
+    }
+    if (searchMode === "styleUpload") {
+      await runStyleUploadSearch();
+      return;
+    }
+    await runClientSearch(showCompleted);
+  }
+
+  function onShowCompletedChange(next: boolean) {
+    setShowCompleted(next);
+    if (!hasSearched || searchMode === "invoice") return;
+    void runClientSearch(next);
+  }
+
   function onGroupByChange(next: ReplenishmentGroupField) {
+    if (searchMode === "styleUpload") return;
     setGroupBy(next);
     if (!rawPayload) return;
-    setRows(finalizeRows(regroup(rawPayload, next)));
+    setRows(applyCompletedMetadata(finalizeRows(regroup(rawPayload, next)), rawPayload, next));
     setConfirmed(false);
     setToast(null);
     setRepPage(0);
@@ -1846,6 +2366,7 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
           return {
             ...row,
             selectedWarehouseStockNos: next,
+            skippedPullback: next.size > 0 ? false : row.skippedPullback,
           };
         }),
       ),
@@ -2041,25 +2562,28 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
   function buildConfirmPayload() {
     return rows
       .filter((row) => {
-        const a = computeAllocationBreakdown(row, replenPartyKey);
-        return (
-          row.selectedWarehouseStockNos.size > 0 ||
-          row.confirmedPullbackItems.length > 0 ||
-          a.memoAlloc > 0 ||
-          a.factoryAllocDisplay > 0 ||
-          (a.pullAlloc > 0 && !row.skippedPullback)
-        );
+        if (row.overrideQty <= 0) return false;
+        const a = singleStatusAllocation(row, replenPartyKey);
+        return a.memoAlloc + a.stockAlloc + a.pullAlloc + a.factoryAllocDisplay > 0;
       })
       .map((row) => {
-        const alloc = computeAllocationBreakdown(row, replenPartyKey);
+        const alloc = singleStatusAllocation(row, replenPartyKey);
         const clientMemoStockNos = row.pullbackItems
           .filter((p) => normalizeReplenParty(p.PartyName) === replenPartyKey)
           .map((p) => p.StockNo);
+        const pullbackBadge =
+          alloc.status === "pullback_available"
+            ? "pullback_available"
+            : alloc.status === "pullback_confirmed"
+              ? "pullback_confirmed"
+              : alloc.status === "pending_pullback"
+                ? "pb_in_progress"
+                : null;
         return {
           groupValue: row.groupValue,
           invoiceNos: row.invoiceNos,
           overrideQty: row.overrideQty,
-          skippedPullback: row.skippedPullback,
+          skippedPullback: alloc.status === "factory_order" && row.skippedPullback,
           allocation: {
             memoAlloc: alloc.memoAlloc,
             stockAlloc: alloc.stockAlloc,
@@ -2067,19 +2591,26 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
             factoryAllocDisplay: alloc.factoryAllocDisplay,
             pullbackAvail: alloc.pullbackAvail,
           },
-          pullbackBadge: derivePullbackBadgeState(row, replenPartyKey),
-          clientMemoStockNos,
+          pullbackBadge,
+          clientMemoStockNos: alloc.status === "memo" ? clientMemoStockNos : [],
           stockNos: [
-            ...[...row.selectedWarehouseStockNos].map((stockNo) => ({
-              stockNo,
-              type: "warehouse" as const,
-            })),
-            ...row.confirmedPullbackItems.map((pb) => ({
-              stockNo: pb.StockNo,
-              type: "pullback" as const,
-            })),
+            ...(alloc.status === "stock"
+              ? [...row.selectedWarehouseStockNos].map((stockNo) => ({
+                  stockNo,
+                  type: "warehouse" as const,
+                }))
+              : []),
+            ...(alloc.status === "pullback_confirmed" || alloc.status === "pending_pullback"
+              ? row.confirmedPullbackItems.map((pb) => ({
+                  stockNo: pb.StockNo,
+                  type: "pullback" as const,
+                }))
+              : []),
           ],
-          confirmedPullbackItems: row.confirmedPullbackItems,
+          confirmedPullbackItems:
+            alloc.status === "pullback_confirmed" || alloc.status === "pending_pullback"
+              ? row.confirmedPullbackItems
+              : [],
           pullbackChangeHistory: row.pullbackChangeHistory.map((h) => ({
             previousItems: h.previousItems,
             reason: h.reason,
@@ -2104,70 +2635,95 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
     const now = new Date().toISOString();
     const items: ReplenishmentExportSourceItem[] = [];
     for (const row of rows) {
-      const alloc = computeAllocationBreakdown(row, replenPartyKey);
-      const badge = derivePullbackBadgeState(row, replenPartyKey);
+      const alloc = singleStatusAllocation(row, replenPartyKey);
       for (const inv of row.invoiceNos) {
-        for (const sn of row.selectedWarehouseStockNos) {
-          items.push({
-            invoiceNo: inv,
-            partyName: exportDisplayName,
-            styleNo: row.groupValue,
-            status: "stock",
-            stockNo: sn,
-            replenishedByName: "—",
-            replenishedAt: now,
-          });
+        if (alloc.status === "stock") {
+          for (const sn of row.selectedWarehouseStockNos) {
+            items.push({
+              invoiceNo: inv,
+              partyName: exportDisplayName,
+              styleNo: row.groupValue,
+              status: "stock",
+              stockNo: sn,
+              replenishedByName: "—",
+              replenishedAt: now,
+            });
+          }
         }
-        for (let i = 0; i < alloc.memoAlloc; i++) {
-          items.push({
-            invoiceNo: inv,
-            partyName: exportDisplayName,
-            styleNo: row.groupValue,
-            status: "memo",
-            stockNo: "—",
-            replenishedByName: "—",
-            replenishedAt: now,
-          });
+        if (alloc.status === "memo") {
+          for (let i = 0; i < alloc.memoAlloc; i++) {
+            items.push({
+              invoiceNo: inv,
+              partyName: exportDisplayName,
+              styleNo: row.groupValue,
+              status: "memo",
+              stockNo: "—",
+              replenishedByName: "—",
+              replenishedAt: now,
+            });
+          }
         }
-        for (const pb of row.confirmedPullbackItems) {
-          const status =
-            badge === "pb_in_progress" ? "pending_pullback" : "pullback_confirmed";
-          items.push({
-            invoiceNo: inv,
-            partyName: exportDisplayName,
-            styleNo: row.groupValue,
-            status,
-            stockNo: pb.StockNo,
-            replenishedByName: "—",
-            replenishedAt: now,
-          });
+        if (alloc.status === "pullback_confirmed" || alloc.status === "pending_pullback") {
+          for (const pb of row.confirmedPullbackItems) {
+            items.push({
+              invoiceNo: inv,
+              partyName: exportDisplayName,
+              styleNo: row.groupValue,
+              status: alloc.status === "pending_pullback" ? "pending_pullback" : "pullback_confirmed",
+              stockNo: pb.StockNo,
+              replenishedByName: "—",
+              replenishedAt: now,
+            });
+          }
         }
-        for (let i = 0; i < alloc.factoryAllocDisplay; i++) {
-          items.push({
-            invoiceNo: inv,
-            partyName: exportDisplayName,
-            styleNo: row.groupValue,
-            status: "factory_order",
-            stockNo: "—",
-            replenishedByName: "—",
-            replenishedAt: now,
-          });
+        if (alloc.status === "pullback_available") {
+          for (let i = 0; i < alloc.pullAlloc; i++) {
+            items.push({
+              invoiceNo: inv,
+              partyName: exportDisplayName,
+              styleNo: row.groupValue,
+              status: "pullback_available",
+              stockNo: "—",
+              replenishedByName: "—",
+              replenishedAt: now,
+            });
+          }
+        }
+        if (alloc.status === "factory_order") {
+          for (let i = 0; i < alloc.factoryAllocDisplay; i++) {
+            items.push({
+              invoiceNo: inv,
+              partyName: exportDisplayName,
+              styleNo: row.groupValue,
+              status: "factory_order",
+              stockNo: "—",
+              replenishedByName: "—",
+              replenishedAt: now,
+            });
+          }
         }
       }
     }
     return items;
   }
 
+  function buildCurrentResultsExportRows(): CurrentReplenishmentExportRow[] {
+    return visibleRows.map((row) => {
+      const status = deriveSingleRowStatus(row, replenPartyKey);
+      return {
+        invoiceNo: row.invoiceNos.join(", "),
+        clientName: exportDisplayName,
+        groupValue: row.groupValue,
+        quantity: row.overrideQty,
+        status,
+        stockNo: status === "stock" ? [...row.selectedWarehouseStockNos].join(", ") : "",
+        productSummary: row.productSummary,
+      };
+    });
+  }
+
   function resolveSavedStatus(row: TableRow): string {
-    const alloc = computeAllocationBreakdown(row, replenPartyKey);
-    const badge = derivePullbackBadgeState(row, replenPartyKey);
-    if (row.selectedWarehouseStockNos.size > 0) return "stock";
-    if (alloc.memoAlloc > 0 && alloc.stockAlloc === 0) return "memo";
-    if (badge === "pullback_confirmed") return "pullback_confirmed";
-    if (badge === "pb_in_progress") return "pending_pullback";
-    if (badge === "pullback_available" && !row.skippedPullback) return "pullback";
-    if (row.skippedPullback || alloc.factoryAllocDisplay > 0) return "factory_order";
-    return "factory_order";
+    return deriveSingleRowStatus(row, replenPartyKey);
   }
 
   async function submitConfirm(force: boolean) {
@@ -2229,19 +2785,10 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
     void submitConfirm(false);
   }
 
-  function exportConfirmedPdf() {
-    if (!confirmed || exportSnapshot.length === 0) return;
-    exportConfirmedReplenishmentPdf(toConfirmedExportRows(exportSnapshot), exportDisplayName);
-  }
-
-  async function exportConfirmedExcel() {
-    if (!confirmed || exportSnapshot.length === 0) return;
-    await exportConfirmedReplenishmentExcel(toConfirmedExportRows(exportSnapshot), exportDisplayName);
-  }
-
-  function exportFactoryPdf() {
-    if (!confirmed || exportSnapshot.length === 0) return;
-    exportFactoryOrdersPdf(toFactoryExportRows(exportSnapshot), exportDisplayName);
+  async function exportCurrentResultsExcel() {
+    const currentRows = buildCurrentResultsExportRows();
+    if (currentRows.length === 0) return;
+    await exportCurrentReplenishmentExcel(currentRows, exportDisplayName);
   }
 
   async function exportFactoryExcel() {
@@ -2311,7 +2858,7 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
               Find lines to replenish
             </h2>
             <p className="mt-1 text-[13px] text-muted-foreground">
-              Search by client or invoice across a date range.
+              Search by client, invoice, or upload StyleNo + MetalType.
             </p>
           </div>
           <div className="inline-flex shrink-0 gap-0.5 rounded-full bg-secondary p-0.5">
@@ -2321,6 +2868,7 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
                 setSearchMode("client");
                 setError(null);
                 setInvoiceSearchSummary(null);
+                setStyleUploadSummary(null);
               }}
               className={cn(
                 "h-8 rounded-full px-4 text-[12px] font-semibold transition",
@@ -2337,6 +2885,7 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
                 setSearchMode("invoice");
                 setError(null);
                 setInvoiceSearchSummary(null);
+                setStyleUploadSummary(null);
               }}
               className={cn(
                 "h-8 rounded-full px-4 text-[12px] font-semibold transition",
@@ -2346,6 +2895,22 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
               )}
             >
               Invoice
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setSearchMode("styleUpload");
+                setError(null);
+                setInvoiceSearchSummary(null);
+              }}
+              className={cn(
+                "h-8 rounded-full px-4 text-[12px] font-semibold transition",
+                searchMode === "styleUpload"
+                  ? "bg-foreground text-background shadow-sm"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              By Style
             </button>
           </div>
         </div>
@@ -2455,6 +3020,38 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
             </button>
           </div>
         </div>
+        ) : searchMode === "styleUpload" ? (
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
+            <div className="min-w-0 space-y-1.5">
+              <label className="text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">
+                Style Excel
+              </label>
+              <input
+                type="file"
+                accept=".xlsx,.csv"
+                onChange={(e) => setStyleUploadFile(e.target.files?.[0] ?? null)}
+                className="h-11 w-full rounded-full border border-border bg-card px-4 py-2 text-sm text-foreground outline-none transition file:mr-3 file:rounded-full file:border-0 file:bg-secondary file:px-3 file:py-1 file:text-xs file:font-semibold file:text-foreground focus:border-foreground/25 focus:ring-2 focus:ring-ring/20"
+              />
+              <p className="text-xs text-muted-foreground">
+                Required columns: <span className="font-semibold text-foreground">StyleNo</span> and{" "}
+                <span className="font-semibold text-foreground">MetalType</span>. Each row starts with Qty 1.
+              </p>
+            </div>
+            <div className="flex flex-col justify-start space-y-1.5">
+              <span className="text-[11px] font-semibold tracking-wide text-transparent uppercase" aria-hidden>
+                Upload
+              </span>
+              <button
+                type="button"
+                disabled={loading}
+                onClick={handleSearch}
+                className={cn(btnPrimary, "h-11 w-full min-w-[7.5rem] px-6")}
+              >
+                <FileSpreadsheet className="size-4" strokeWidth={2.2} />
+                Upload
+              </button>
+            </div>
+          </div>
         ) : (
           <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
             <div className="min-w-0 space-y-1.5">
@@ -2496,6 +3093,15 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
             · {invoiceSearchSummary.lineCount} items
           </p>
         ) : null}
+        {styleUploadSummary ? (
+          <p
+            className="mt-2 rounded-md border-[0.5px] border-foreground bg-emerald-50 px-3 py-1.5 text-xs font-medium text-foreground sm:text-sm"
+            role="status"
+          >
+            By Style · {styleUploadSummary.fileName} · {styleUploadSummary.rowCount} row
+            {styleUploadSummary.rowCount === 1 ? "" : "s"}
+          </p>
+        ) : null}
         {error ? (
           <p className="mt-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">
             {error}
@@ -2524,12 +3130,12 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
             ) : null}
           </div>
           <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 sm:gap-3">
-            {rows.length > 0 ? (
+            {rows.length > 0 && searchMode !== "styleUpload" ? (
               <label className="flex cursor-pointer items-center gap-2 text-[12px] text-muted-foreground">
                 <input
                   type="checkbox"
                   checked={showCompleted}
-                  onChange={(e) => setShowCompleted(e.target.checked)}
+                  onChange={(e) => onShowCompletedChange(e.target.checked)}
                   className="size-3.5 rounded border-border"
                 />
                 Show completed
@@ -2541,21 +3147,17 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
                 groupBy={groupBy}
                 onSelect={onGroupByChange}
                 activeRowCount={hasSearched ? rows.length : null}
-                disabled={loading}
+                disabled={loading || searchMode === "styleUpload"}
               />
             </div>
             {rows.length > 0 && showExportConfirmed ? (
               <IconExportButtons
-                disabled={!confirmed}
-                onPdf={exportConfirmedPdf}
-                onExcel={exportConfirmedExcel}
+                onExcel={exportCurrentResultsExcel}
               />
             ) : null}
             {rows.length > 0 && showExportFactoryOrders && !showExportConfirmed ? (
               <IconExportButtons
-                disabled={!confirmed}
-                onPdf={exportFactoryPdf}
-                onExcel={exportFactoryExcel}
+                onExcel={exportCurrentResultsExcel}
               />
             ) : null}
           </div>
@@ -2572,20 +3174,110 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
             <table className="w-full min-w-[980px] border-separate border-spacing-0 text-sm">
               <thead>
                 <tr>
-                  <th className={`${reTh} min-w-[5.5rem] whitespace-nowrap`}>Style</th>
-                  <th className={`${reTh} min-w-[11rem]`}>Product</th>
-                  <th className={reTh}>Sold</th>
-                  <th className={reTh}>Qty</th>
-                  <th className={`${reTh} min-w-[8.5rem]`}>Status</th>
-                  <th className={reTh}>WH</th>
-                  <th className={reTh}>Pullback</th>
-                  <th className={reTh}>Factory</th>
+                  <ResultColumnMenuTh
+                    label="Style"
+                    sortKey="groupValue"
+                    activeKey={resultSortBy}
+                    direction={resultSortDir}
+                    onSortAsc={(key) => setResultSort(key, "asc")}
+                    onSortDesc={(key) => setResultSort(key, "desc")}
+                    filterValue={resultColumnFilters.groupValue}
+                    filterOptions={buildResultFilterOptions(filterSourceRows, "groupValue", replenPartyKey)}
+                    onFilterChange={setResultColumnFilter}
+                    className={`${reTh} min-w-[5.5rem] whitespace-nowrap`}
+                  />
+                  <ResultColumnMenuTh
+                    label="Product"
+                    sortKey="productSummary"
+                    activeKey={resultSortBy}
+                    direction={resultSortDir}
+                    onSortAsc={(key) => setResultSort(key, "asc")}
+                    onSortDesc={(key) => setResultSort(key, "desc")}
+                    filterValue={resultColumnFilters.productSummary}
+                    filterOptions={buildResultFilterOptions(filterSourceRows, "productSummary", replenPartyKey)}
+                    onFilterChange={setResultColumnFilter}
+                    className={`${reTh} min-w-[11rem]`}
+                  />
+                  <ResultColumnMenuTh
+                    label="Sold"
+                    sortKey="soldQty"
+                    activeKey={resultSortBy}
+                    direction={resultSortDir}
+                    onSortAsc={(key) => setResultSort(key, "asc")}
+                    onSortDesc={(key) => setResultSort(key, "desc")}
+                    filterValue={resultColumnFilters.soldQty}
+                    filterOptions={buildResultFilterOptions(filterSourceRows, "soldQty", replenPartyKey)}
+                    onFilterChange={setResultColumnFilter}
+                    className={reTh}
+                  />
+                  <ResultColumnMenuTh
+                    label="Qty"
+                    sortKey="overrideQty"
+                    activeKey={resultSortBy}
+                    direction={resultSortDir}
+                    onSortAsc={(key) => setResultSort(key, "asc")}
+                    onSortDesc={(key) => setResultSort(key, "desc")}
+                    filterValue={resultColumnFilters.overrideQty}
+                    filterOptions={buildResultFilterOptions(filterSourceRows, "overrideQty", replenPartyKey)}
+                    onFilterChange={setResultColumnFilter}
+                    className={reTh}
+                  />
+                  <ResultColumnMenuTh
+                    label="Status"
+                    sortKey="status"
+                    activeKey={resultSortBy}
+                    direction={resultSortDir}
+                    onSortAsc={(key) => setResultSort(key, "asc")}
+                    onSortDesc={(key) => setResultSort(key, "desc")}
+                    filterValue={resultColumnFilters.status}
+                    filterOptions={buildResultFilterOptions(filterSourceRows, "status", replenPartyKey)}
+                    onFilterChange={setResultColumnFilter}
+                    className={`${reTh} w-[11.5rem] min-w-[11.5rem] whitespace-nowrap`}
+                  />
+                  <ResultColumnMenuTh
+                    label="Selected Stock"
+                    sortKey="selectedStock"
+                    activeKey={resultSortBy}
+                    direction={resultSortDir}
+                    onSortAsc={(key) => setResultSort(key, "asc")}
+                    onSortDesc={(key) => setResultSort(key, "desc")}
+                    filterValue={resultColumnFilters.selectedStock}
+                    filterOptions={buildResultFilterOptions(filterSourceRows, "selectedStock", replenPartyKey)}
+                    onFilterChange={setResultColumnFilter}
+                    className={reTh}
+                  />
+                  <ResultColumnMenuTh
+                    label="Pullback"
+                    sortKey="pullbackAvailable"
+                    activeKey={resultSortBy}
+                    direction={resultSortDir}
+                    onSortAsc={(key) => setResultSort(key, "asc")}
+                    onSortDesc={(key) => setResultSort(key, "desc")}
+                    filterValue={resultColumnFilters.pullbackAvailable}
+                    filterOptions={buildResultFilterOptions(filterSourceRows, "pullbackAvailable", replenPartyKey)}
+                    onFilterChange={setResultColumnFilter}
+                    className={reTh}
+                  />
+                  <ResultColumnMenuTh
+                    label="Factory"
+                    sortKey="factoryOrder"
+                    activeKey={resultSortBy}
+                    direction={resultSortDir}
+                    onSortAsc={(key) => setResultSort(key, "asc")}
+                    onSortDesc={(key) => setResultSort(key, "desc")}
+                    filterValue={resultColumnFilters.factoryOrder}
+                    filterOptions={buildResultFilterOptions(filterSourceRows, "factoryOrder", replenPartyKey)}
+                    onFilterChange={setResultColumnFilter}
+                    className={reTh}
+                  />
                   <th className={`${reTh} min-w-[5.5rem] text-right`}> </th>
                 </tr>
               </thead>
               <tbody className="bg-card">
                 {repPageRows.map((row) => {
                   const ui = deriveRowUiState(row, replenPartyKey);
+                  const singleStatus = deriveSingleRowStatus(row, replenPartyKey);
+                  const showStockPills = shouldShowStockPills(row, singleStatus, ui);
                   return (
                   <tr
                     key={row.groupValue}
@@ -2619,7 +3311,7 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
                         />
                       </div>
                     </td>
-                    <td className={`${reTd} align-middle`}>
+                    <td className={`${reTd} w-[11.5rem] min-w-[11.5rem] align-middle`}>
                       {ui.disabledChip ? (
                         <DisabledStatusChip label={ui.disabledChip} />
                       ) : (
@@ -2633,16 +3325,15 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
                     </td>
                     <td className={`${reTd} align-top`}>
                       <div className="space-y-1.5">
-                        <span className="font-medium tabular-nums text-foreground">
-                          {row.inWarehouse > 0 ? row.inWarehouse : "—"}
-                        </span>
-                        {row.warehousePillStockNos.length > 0 ? (
+                        {showStockPills ? (
                           <StockPillGroup
                             allStockNos={row.warehousePillStockNos}
                             selectedStockNos={row.selectedWarehouseStockNos}
                             onToggle={(sn) => onTogglePill(row.groupValue, sn)}
                           />
-                        ) : null}
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
                       </div>
                     </td>
                     <td className={`${reTd} font-medium tabular-nums text-foreground`}>
@@ -2654,8 +3345,7 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
                     <td className={`${reTd} text-right align-middle`}>
                       <div className="flex flex-col items-end gap-1.5">
                         {!ui.isDisabled &&
-                        !row.skippedPullback &&
-                        computeAllocationBreakdown(row, replenPartyKey).pullbackAvail > 0 ? (
+                        singleStatus === "pullback_available" ? (
                           <button
                             type="button"
                             onClick={() => {
@@ -2890,14 +3580,14 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
         </div>
       </div>
 
-      {rows.length > 0 ? (
+      {rows.length > 0 && searchMode !== "styleUpload" ? (
         <div className="surface-card flex shrink-0 flex-wrap items-center justify-between gap-4 px-4 py-4 sm:px-5">
           <div className="min-w-0 flex-1 space-y-1">
             <p className="text-[15px] font-semibold tracking-tight text-foreground">
               {confirmSummary.lines > 0 ? (
                 <>
                   {confirmSummary.lines} line{confirmSummary.lines === 1 ? "" : "s"} · {confirmSummary.units} unit
-                  {confirmSummary.units === 1 ? "" : "s"} across pullback & factory
+                  {confirmSummary.units === 1 ? "" : "s"} ready to confirm
                 </>
               ) : (
                 <>Select warehouse stock, pullback, or factory lines to confirm</>
@@ -2918,10 +3608,9 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
             ) : null}
             {showExportFactoryOrders && confirmed && showExportConfirmed ? (
               <div className="flex flex-wrap gap-2 pt-1">
-                <ExportDropdown
+                <ExcelExportButton
                   label="Factory orders"
                   disabled={false}
-                  onPdf={exportFactoryPdf}
                   onExcel={() => void exportFactoryExcel()}
                 />
               </div>

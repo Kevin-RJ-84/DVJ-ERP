@@ -48,6 +48,16 @@ export type ReplenishmentExportSourceItem = {
   replenishedAt?: string;
 };
 
+export type CurrentReplenishmentExportRow = {
+  invoiceNo: string;
+  clientName: string;
+  groupValue: string;
+  quantity: number;
+  status: string;
+  stockNo?: string | null;
+  productSummary?: string | null;
+};
+
 function safeFileSegment(s: string): string {
   const t = s.replace(/[/\\?*[\]:]/g, "_").replace(/\s+/g, " ").trim();
   return t.slice(0, 80) || "export";
@@ -71,6 +81,50 @@ export function confirmedTypeLabel(status: string): string {
   if (s === "memo") return "Memo";
   if (s === "pullback_confirmed") return "Pullback Confirmed";
   return status;
+}
+
+export function currentStatusLabel(status: string): string {
+  const s = status.toLowerCase();
+  if (s === "memo") return "Memo";
+  if (s === "stock") return "Stock";
+  if (s === "pullback_available" || s === "pullback") return "Pullback Available";
+  if (s === "pullback_confirmed") return "Pullback Confirmed";
+  if (s === "pending_pullback" || s === "pb_in_progress") return "Pending Pullback";
+  if (s === "factory_order") return "Factory Order";
+  if (s === "factory_order_placed") return "Factory Order Placed";
+  return status;
+}
+
+export async function exportCurrentReplenishmentExcel(
+  rows: CurrentReplenishmentExportRow[],
+  clientName: string,
+) {
+  const wb = new ExcelJS.Workbook();
+  const sheet = wb.addWorksheet("Current Results");
+  sheet.addRow(["InvoiceNo", "ClientName", "Group", "Quantity", "Status", "StockNo", "ProductSummary"]);
+
+  for (const r of rows) {
+    sheet.addRow([
+      r.invoiceNo,
+      r.clientName,
+      r.groupValue,
+      r.quantity,
+      currentStatusLabel(r.status),
+      r.stockNo && r.stockNo !== "—" ? r.stockNo : "",
+      r.productSummary ?? "",
+    ]);
+  }
+
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `client-replenishment-current-${safeFileSegment(clientName)}-${exportDateStamp()}.xlsx`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 export function toConfirmedExportRows(items: ReplenishmentExportSourceItem[]): ConfirmedReplenishmentExportRow[] {

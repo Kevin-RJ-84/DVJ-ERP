@@ -1,9 +1,10 @@
 "use client";
 
-import { FileSpreadsheet, Upload, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, FileSpreadsheet, LoaderCircle, Settings2, Upload, X } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { REPORT_TYPES, type ReportType } from "@/lib/excel-config";
+import type { UploadImportStatusPayload } from "@/lib/import-upload";
 import {
   alertError,
   alertSuccess,
@@ -44,18 +45,54 @@ export function UploadModal({
   const [importDebug, setImportDebug] = useState(false);
   const [importDebugHalt, setImportDebugHalt] = useState(false);
   const [debugPayload, setDebugPayload] = useState<string | null>(null);
+  const [mappingStatus, setMappingStatus] = useState<UploadImportStatusPayload | null>(null);
+  const [isCheckingMappings, setIsCheckingMappings] = useState(false);
 
   const isControlled = mode === "controlled";
   const isOpen = isControlled ? Boolean(controlledOpen) : internalOpen;
 
   useEffect(() => {
     if (!isControlled || !controlledOpen) return;
-    setReportType(defaultReportType);
-    setFile(null);
-    setError(null);
-    setNotice(null);
-    setDebugPayload(null);
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setReportType(defaultReportType);
+      setFile(null);
+      setError(null);
+      setNotice(null);
+      setDebugPayload(null);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [isControlled, controlledOpen, defaultReportType]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    let cancelled = false;
+    async function loadMappingStatus() {
+      setIsCheckingMappings(true);
+      try {
+        const response = await fetch("/api/upload", { credentials: "same-origin" });
+        const result = (await response.json()) as UploadImportStatusPayload & { message?: string };
+        if (!cancelled && response.ok) {
+          setMappingStatus(result);
+        }
+      } catch {
+        // Upload POST remains the source of truth if this lightweight readiness check fails.
+      } finally {
+        if (!cancelled) {
+          setIsCheckingMappings(false);
+        }
+      }
+    }
+
+    void loadMappingStatus();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen]);
 
   function closeDialog() {
     if (isControlled) onClose?.();
@@ -69,7 +106,17 @@ export function UploadModal({
     setDebugPayload(null);
   }
 
+  const currentMappingStatus = mappingStatus?.[reportType] ?? null;
+  const mappingReady = currentMappingStatus?.mappingConfigured ?? false;
+  const shouldBlockForMapping = Boolean(currentMappingStatus && !currentMappingStatus.mappingConfigured);
+  const missingRequiredFields = currentMappingStatus?.missingRequiredFields ?? [];
+
   async function handleUpload() {
+    if (shouldBlockForMapping) {
+      setError("Configure the Excel mapping before uploading this report type.");
+      return;
+    }
+
     if (!file) {
       setError("Please select a file before uploading.");
       return;
@@ -180,7 +227,13 @@ export function UploadModal({
                 Report type
                 <select
                   value={reportType}
-                  onChange={(event) => setReportType(event.target.value as ReportType)}
+                  onChange={(event) => {
+                    setReportType(event.target.value as ReportType);
+                    setFile(null);
+                    setError(null);
+                    setNotice(null);
+                    setDebugPayload(null);
+                  }}
                   className={fieldInput}
                 >
                   {REPORT_TYPES.map((type) => (
@@ -191,12 +244,48 @@ export function UploadModal({
                 </select>
               </label>
 
+              {isCheckingMappings ? (
+                <div className="flex items-start gap-3 rounded-xl border border-border bg-secondary/50 px-4 py-3 text-sm text-muted-foreground">
+                  <LoaderCircle className="mt-0.5 size-4 shrink-0 animate-spin" aria-hidden />
+                  Checking saved Excel mapping before upload…
+                </div>
+              ) : shouldBlockForMapping ? (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4 text-sm text-amber-950">
+                  <div className="flex items-start gap-3">
+                    <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-amber-100 text-amber-700">
+                      <AlertTriangle className="size-5" aria-hidden />
+                    </span>
+                    <div className="min-w-0">
+                      <p className="font-semibold">Configure {REPORT_LABELS[reportType].toLowerCase()} mapping first</p>
+                      <p className="mt-1 leading-relaxed text-amber-900/85">
+                        Uploads need a saved column map so the importer knows which Excel headers contain{" "}
+                        {missingRequiredFields.length > 0 ? missingRequiredFields.join(", ") : "the required fields"}.
+                      </p>
+                      <Link
+                        href="/excel-config"
+                        onClick={closeDialog}
+                        className="mt-3 inline-flex h-10 items-center gap-2 rounded-full bg-amber-950 px-4 text-sm font-semibold text-white transition hover:bg-amber-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-700/30"
+                      >
+                        <Settings2 className="size-4" aria-hidden />
+                        Open Excel map config
+                      </Link>
+                    </div>
+                  </div>
+                </div>
+              ) : currentMappingStatus ? (
+                <div className="flex items-start gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
+                  <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-600" aria-hidden />
+                  Mapping ready for {REPORT_LABELS[reportType].toLowerCase()} ({currentMappingStatus.mappedFieldCount} fields).
+                </div>
+              ) : null}
+
               <label className={fieldLabel}>
                 File (.xlsx / .csv)
                 <input
                   type="file"
                   accept=".xlsx,.csv"
                   onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+                  disabled={isCheckingMappings || shouldBlockForMapping}
                   className={cn(
                     fieldInput,
                     "h-auto py-2 file:mr-3 file:cursor-pointer file:rounded-lg file:border-0 file:bg-secondary file:px-3 file:py-2 file:text-sm file:font-semibold file:text-foreground hover:file:bg-accent",
@@ -263,9 +352,14 @@ export function UploadModal({
               <button type="button" onClick={closeDialog} className={btnSecondary}>
                 Cancel
               </button>
-              <button type="button" onClick={handleUpload} disabled={isSubmitting} className={btnPrimary}>
+              <button
+                type="button"
+                onClick={handleUpload}
+                disabled={isSubmitting || isCheckingMappings || shouldBlockForMapping}
+                className={btnPrimary}
+              >
                 <Upload className="size-4" aria-hidden />
-                {isSubmitting ? "Uploading…" : "Upload"}
+                {isSubmitting ? "Uploading…" : mappingReady ? "Upload" : "Upload"}
               </button>
             </div>
           </div>

@@ -12,7 +12,7 @@ export default async function ExcelConfigPage() {
   if (!canAccess) redirect("/dashboard");
 
   return (
-    <GroupPageFrame className="h-full min-h-0 w-full" contentFill>
+    <GroupPageFrame className="w-full">
       <ExcelConfigManager />
     </GroupPageFrame>
   );

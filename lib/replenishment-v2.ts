@@ -67,5 +67,13 @@ export type ReplenishmentV2ApiPayload = {
     soldItems: ReplenishmentV2RawSoldItem[];
     inWarehouseItems: ReplenishmentV2RawWarehouseItem[];
     pullbackItems: ReplenishmentV2RawPullbackItem[];
+    completedItems?: Array<{
+      invoiceNo: string;
+      groupField: ReplenishmentGroupField | string;
+      groupValue: string;
+      status: string;
+      stockNo: string | null;
+      pullbackCandidateCount: number | null;
+    }>;
   };
 };

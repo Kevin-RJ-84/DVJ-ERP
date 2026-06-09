@@ -1208,19 +1208,35 @@ function mapRowToImportSnapshot(
     LastImportAt: Date | null;
     LastImportInserted: number | null;
     LastImportUpdated: number | null;
+    Mapping: unknown;
+    ReportType: string;
   } | null,
+  reportType: ReportType,
 ) {
+  const parsed = parseStoredExcelMappingJson(row?.Mapping, reportType);
+  const mappedValues = new Set(Object.values(parsed.columns));
+  const requiredFields = [...REQUIRED_MAPPED_FIELDS[reportType]];
+  const missingRequiredFields = requiredFields.filter((field) => !mappedValues.has(field));
+
   if (!row) {
     return {
       lastImportAt: null,
       lastImportInserted: null,
       lastImportUpdated: null,
+      mappingConfigured: false,
+      mappedFieldCount: 0,
+      requiredFields,
+      missingRequiredFields,
     };
   }
   return {
     lastImportAt: row.LastImportAt?.toISOString() ?? null,
     lastImportInserted: row.LastImportInserted ?? null,
     lastImportUpdated: row.LastImportUpdated ?? null,
+    mappingConfigured: Object.keys(parsed.columns).length > 0 && missingRequiredFields.length === 0,
+    mappedFieldCount: Object.keys(parsed.columns).length,
+    requiredFields,
+    missingRequiredFields,
   };
 }
 
@@ -1234,8 +1250,8 @@ export async function GET(request: NextRequest) {
   ]);
 
   const body: UploadImportStatusPayload = {
-    stock: mapRowToImportSnapshot(stockRow),
-    sales: mapRowToImportSnapshot(salesRow),
+    stock: mapRowToImportSnapshot(stockRow, "stock"),
+    sales: mapRowToImportSnapshot(salesRow, "sales"),
   };
 
   return NextResponse.json(body);

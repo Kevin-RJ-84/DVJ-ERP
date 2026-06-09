@@ -17,6 +17,7 @@ const querySchema = z.object({
   toDate: z.string().date(),
   groupBy: z.enum(REPLENISHMENT_GROUP_FIELDS),
   includeRaw: z.boolean().optional().default(false),
+  includeCompleted: z.boolean().optional().default(false),
 });
 
 const invoiceQuerySchema = z.object({
@@ -141,6 +142,7 @@ export async function GET(request: NextRequest) {
   let invoiceSearchSummary: ReplenishmentV2InvoiceSearchSummary | undefined;
   const invoiceMode = invoiceNoRaw.length > 0;
   let searchClientId: string | undefined;
+  let includeCompleted = false;
 
   if (invoiceMode) {
     const invParsed = invoiceQuerySchema.safeParse({
@@ -183,6 +185,11 @@ export async function GET(request: NextRequest) {
       toDate: searchParams.get("toDate"),
       groupBy: searchParams.get("groupBy"),
       includeRaw: includeRawParam,
+      includeCompleted: ["1", "true", "yes"].includes(
+        String(searchParams.get("includeCompleted") ?? "")
+          .trim()
+          .toLowerCase(),
+      ),
     });
 
     if (!parsed.success) {
@@ -193,6 +200,7 @@ export async function GET(request: NextRequest) {
     }
 
     const { clientId, fromDate, toDate } = parsed.data;
+    includeCompleted = parsed.data.includeCompleted;
     searchClientId = clientId;
     ({ groupBy, includeRaw } = parsed.data);
 
@@ -229,17 +237,45 @@ export async function GET(request: NextRequest) {
   const invoiceNosInRange = [...new Set(salesItems.map((s) => s.InvoiceNo))];
   const excludedInvoiceNos = new Set<string>();
   const replenishedCombos = new Set<string>(); // JSON([invoiceNo, groupField, groupValue])
+  const completedItems: NonNullable<ReplenishmentV2ApiPayload["raw"]["completedItems"]> = [];
 
   if (!invoiceMode && invoiceNosInRange.length > 0) {
     const activeReps = await db.replenishments.findMany({
       where: { InvoiceNo: { in: invoiceNosInRange }, IsUndone: false },
-      select: { InvoiceNo: true, GroupField: true, GroupValue: true },
+      select: {
+        InvoiceNo: true,
+        GroupField: true,
+        GroupValue: true,
+        Items: {
+          where: { IsActive: true },
+          select: {
+            InvoiceNo: true,
+            GroupField: true,
+            GroupValue: true,
+            Status: true,
+            StockNo: true,
+            PullbackCandidateCount: true,
+          },
+        },
+      },
     });
     for (const r of activeReps) {
-      if (partialVisibility) {
-        replenishedCombos.add(JSON.stringify([r.InvoiceNo, r.GroupField, r.GroupValue]));
-      } else {
-        excludedInvoiceNos.add(r.InvoiceNo);
+      for (const item of r.Items) {
+        completedItems.push({
+          invoiceNo: item.InvoiceNo,
+          groupField: item.GroupField,
+          groupValue: item.GroupValue,
+          status: item.Status,
+          stockNo: item.StockNo,
+          pullbackCandidateCount: item.PullbackCandidateCount,
+        });
+      }
+      if (!includeCompleted) {
+        if (partialVisibility) {
+          replenishedCombos.add(JSON.stringify([r.InvoiceNo, r.GroupField, r.GroupValue]));
+        } else {
+          excludedInvoiceNos.add(r.InvoiceNo);
+        }
       }
     }
   }
@@ -493,6 +529,7 @@ export async function GET(request: NextRequest) {
           },
         };
       }),
+    completedItems,
   };
 
   const soldByGroup = new Map<string, number>();
