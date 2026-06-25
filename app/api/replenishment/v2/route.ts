@@ -75,6 +75,60 @@ function groupValueFor(values: Record<ReplenishmentGroupField, string | null>, g
   return values[groupBy]?.trim() || GROUP_LABEL_FOR_EMPTY;
 }
 
+function normalizeMetalTypeUpper(value: string | null | undefined): string {
+  return value?.trim().toUpperCase() ?? "";
+}
+
+function stockGroupValuesFromMemoStock(stock: {
+  StyleNo: string | null;
+  ProductType: string | null;
+  StoneShape: string | null;
+  Metal: string | null;
+  MetalType: string | null;
+  ProductStyle: string | null;
+}): Record<ReplenishmentGroupField, string | null> {
+  return {
+    StyleNo: trimOrNull(stock.StyleNo),
+    ProductType: trimOrNull(stock.ProductType),
+    StoneShape: trimOrNull(stock.StoneShape),
+    Metal: trimOrNull(stock.Metal),
+    MetalType: trimOrNull(stock.MetalType),
+    ProductStyle: trimOrNull(stock.ProductStyle),
+  };
+}
+
+function countClientMemoForGroup(
+  clientMemoItems: Array<{
+    Stock: {
+      StyleNo: string | null;
+      ProductType: string | null;
+      StoneShape: string | null;
+      Metal: string | null;
+      MetalType: string | null;
+      ProductStyle: string | null;
+    } | null;
+  }>,
+  groupBy: ReplenishmentGroupField,
+  groupValue: string,
+  soldInGroup: Array<{ groupValues: Record<ReplenishmentGroupField, string | null> }>,
+): number {
+  const soldMetalTypes = new Set(
+    soldInGroup
+      .map((item) => normalizeMetalTypeUpper(item.groupValues.MetalType))
+      .filter((metalType) => metalType.length > 0),
+  );
+  return clientMemoItems.filter((ms) => {
+    if (!ms.Stock) return false;
+    const gv = stockGroupValuesFromMemoStock(ms.Stock);
+    if (groupValueFor(gv, groupBy) !== groupValue) return false;
+    const metalType = normalizeMetalTypeUpper(ms.Stock.MetalType);
+    if (soldMetalTypes.size > 0 && (metalType.length === 0 || !soldMetalTypes.has(metalType))) {
+      return false;
+    }
+    return true;
+  }).length;
+}
+
 function mergeGroupValues(
   a: Record<ReplenishmentGroupField, string | null> | undefined,
   b: Record<ReplenishmentGroupField, string | null>,
@@ -142,6 +196,7 @@ export async function GET(request: NextRequest) {
   let invoiceSearchSummary: ReplenishmentV2InvoiceSearchSummary | undefined;
   const invoiceMode = invoiceNoRaw.length > 0;
   let searchClientId: string | undefined;
+  let clientPartyName: string | null = null;
   let includeCompleted = false;
 
   if (invoiceMode) {
@@ -211,6 +266,7 @@ export async function GET(request: NextRequest) {
     if (!client) {
       return NextResponse.json({ message: "Client not found." }, { status: 404 });
     }
+    clientPartyName = client.PartyName;
 
     const from = new Date(`${fromDate}T00:00:00.000Z`);
     const to = new Date(`${toDate}T23:59:59.999Z`);
@@ -472,6 +528,67 @@ export async function GET(request: NextRequest) {
     groupHintByStockNo.set(sold.stockNo, mergeGroupValues(prev, sold.groupValues));
   }
 
+  const clientMemoDbRows = searchClientId
+    ? await db.memo_stock.findMany({
+        where: {
+          Status: "active",
+          Memo: {
+            is: {
+              IsActive: true,
+              ClientID: searchClientId,
+            },
+          },
+        },
+        include: {
+          Stock: {
+            select: {
+              StockNo: true,
+              StyleNo: true,
+              MetalType: true,
+              ProductType: true,
+              StoneShape: true,
+              Metal: true,
+              ProductStyle: true,
+            },
+          },
+        },
+      })
+    : [];
+
+  const searchClientName = clientPartyName;
+  const holdDbRows =
+    searchClientId && searchClientName
+      ? await db.stock.findMany({
+          where: {
+            HoldCompany: {
+              equals: searchClientName,
+              mode: "insensitive",
+            },
+            HoldDate: { not: null },
+            StyleNo: { not: null },
+            Sales: { none: {} },
+            MemoStockLinks: {
+              none: {
+                Status: "active",
+                Memo: {
+                  is: { IsActive: true },
+                },
+              },
+            },
+          },
+          select: {
+            StockNo: true,
+            StyleNo: true,
+            MetalType: true,
+            HoldCompany: true,
+            HoldDate: true,
+            ProductDescription: true,
+            Metal: true,
+            MetalPurity: true,
+          },
+        })
+      : [];
+
   const raw: ReplenishmentV2ApiPayload["raw"] = {
     soldItems: soldItemsWithRank,
     inWarehouseItems: inWarehouseRows.map((row) => {
@@ -529,6 +646,29 @@ export async function GET(request: NextRequest) {
           },
         };
       }),
+    holdItems: holdDbRows.map((row) => ({
+      stockNo: row.StockNo,
+      styleNo: trimOrNull(row.StyleNo),
+      metalType: trimOrNull(row.MetalType),
+      holdCompany: trimOrNull(row.HoldCompany),
+      productDescription: row.ProductDescription,
+      location: null,
+      boxCode: null,
+      groupValues: {
+        StyleNo: trimOrNull(row.StyleNo),
+        ProductType: null,
+        StoneShape: null,
+        Metal: trimOrNull(row.Metal),
+        MetalType: trimOrNull(row.MetalType),
+        ProductStyle: null,
+      },
+    })),
+    clientMemoItems: clientMemoDbRows
+      .filter((row) => row.StockNo && row.Stock)
+      .map((row) => ({
+        stockNo: row.StockNo as string,
+        groupValues: stockGroupValuesFromMemoStock(row.Stock!),
+      })),
     completedItems,
   };
 
@@ -543,6 +683,21 @@ export async function GET(request: NextRequest) {
 
   const rows = [...soldByGroup.entries()]
     .map(([groupValue, soldQty]) => {
+      const soldInGroup = raw.soldItems.filter(
+        (item) => groupValueFor(item.groupValues, groupBy) === groupValue,
+      );
+      const groupMemoQty =
+        clientMemoDbRows.length > 0
+          ? countClientMemoForGroup(clientMemoDbRows, groupBy, groupValue, soldInGroup)
+          : 0;
+      const memoAlloc = Math.min(soldQty, groupMemoQty);
+      const groupHoldItems = (raw.holdItems ?? []).filter(
+        (item) => groupValueFor(item.groupValues, groupBy) === groupValue,
+      );
+      let remainingAfterMemo = soldQty - memoAlloc;
+      const holdAlloc = Math.min(remainingAfterMemo, groupHoldItems.length);
+      remainingAfterMemo -= holdAlloc;
+
       const inWarehouseItems = raw.inWarehouseItems
         .filter((item) => groupValueFor(item.groupValues, groupBy) === groupValue)
         .map((item) => ({
@@ -571,6 +726,11 @@ export async function GET(request: NextRequest) {
         }));
       const inWarehouse = inWarehouseItems.length;
       const pullbackAvailable = pullbackItems.length;
+      const stockAlloc = Math.min(remainingAfterMemo, inWarehouse);
+      remainingAfterMemo -= stockAlloc;
+      const pullAlloc = Math.min(remainingAfterMemo, pullbackAvailable);
+      remainingAfterMemo -= pullAlloc;
+      const factoryOrder = Math.max(0, remainingAfterMemo);
       return {
         groupValue,
         styleRank:
@@ -578,9 +738,11 @@ export async function GET(request: NextRequest) {
             ? (styleRankMap.get(groupValue) ?? null)
             : null,
         soldQty,
+        memoAlloc,
+        holdAlloc,
         inWarehouse,
         pullbackAvailable,
-        factoryOrder: Math.max(0, soldQty - inWarehouse - pullbackAvailable),
+        factoryOrder,
         invoiceNos: [...(invoiceNosByGroup.get(groupValue) ?? [])],
         inWarehouseItems,
         pullbackItems,

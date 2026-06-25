@@ -18,6 +18,7 @@ type Tab =
 
 type ErpSyncStatus = {
   lastStockSync: string | null;
+  lastSalesSync: string | null;
   syncEnabled: boolean;
   intervalMinutes: number;
 };
@@ -251,8 +252,11 @@ export function SystemSettingsPage() {
   const [erpManualSyncing, setErpManualSyncing] = useState(false);
   const [erpManualSyncError, setErpManualSyncError] = useState<string | null>(null);
   const [lastSyncResult, setLastSyncResult] = useState<{
-    updated: number;
-    inserted: number;
+    stockUpdated: number;
+    stockInserted: number;
+    salesUpdated: number;
+    salesInserted: number;
+    clientsCreated: number;
     errors: string[];
   } | null>(null);
   const [thresholdRecalculating, setThresholdRecalculating] = useState(false);
@@ -353,27 +357,61 @@ export function SystemSettingsPage() {
     }
   }
 
-  async function handleManualStockSync() {
+  async function handleManualErpSync() {
     setErpManualSyncing(true);
     setErpManualSyncError(null);
     try {
-      const res = await fetch("/api/erp/sync/stock", { method: "POST" });
-      const data = await res.json();
-      if (data.success) {
+      const [stockRes, salesRes] = await Promise.all([
+        fetch("/api/erp/sync/stock", { method: "POST" }),
+        fetch("/api/erp/sync/sales", { method: "POST" }),
+      ]);
+      const stockData = await stockRes.json();
+      const salesData = await salesRes.json();
+
+      const stockOk = stockData.success === true;
+      const salesOk = salesData.success === true;
+
+      if (stockOk || salesOk) {
         const syncedAt = new Date().toISOString();
+        const stockErrors = Array.isArray(stockData.errors) ? stockData.errors : [];
+        const salesErrors = Array.isArray(salesData.errors) ? salesData.errors : [];
         setLastSyncResult({
-          updated: data.updated ?? 0,
-          inserted: data.inserted ?? 0,
-          errors: Array.isArray(data.errors) ? data.errors : [],
+          stockUpdated: stockData.updated ?? 0,
+          stockInserted: stockData.inserted ?? 0,
+          salesUpdated: salesData.updated ?? 0,
+          salesInserted: salesData.inserted ?? 0,
+          clientsCreated: salesData.clientsCreated ?? 0,
+          errors: [...stockErrors, ...salesErrors],
         });
         setErpSyncStatus((prev) =>
           prev
-            ? { ...prev, lastStockSync: syncedAt }
-            : { lastStockSync: syncedAt, syncEnabled: true, intervalMinutes: 30 },
+            ? {
+                ...prev,
+                lastStockSync: stockOk ? syncedAt : prev.lastStockSync,
+                lastSalesSync: salesOk ? syncedAt : prev.lastSalesSync,
+              }
+            : {
+                lastStockSync: stockOk ? syncedAt : null,
+                lastSalesSync: salesOk ? syncedAt : null,
+                syncEnabled: true,
+                intervalMinutes: 30,
+              },
         );
-        setConfig((prev) => (prev ? { ...prev, erp_last_stock_sync: syncedAt } : prev));
-      } else {
-        setErpManualSyncError(data.error ?? "Sync failed.");
+        if (stockOk) {
+          setConfig((prev) => (prev ? { ...prev, erp_last_stock_sync: syncedAt } : prev));
+        }
+        if (salesOk) {
+          setConfig((prev) => (prev ? { ...prev, erp_last_sales_sync: syncedAt } : prev));
+        }
+      }
+
+      if (!stockOk && !salesOk) {
+        setErpManualSyncError(stockData.error ?? salesData.error ?? "Sync failed.");
+      } else if (!stockOk || !salesOk) {
+        const parts: string[] = [];
+        if (!stockOk) parts.push(`Stock: ${stockData.error ?? stockData.message ?? "failed"}`);
+        if (!salesOk) parts.push(`Sales: ${salesData.error ?? salesData.message ?? "failed"}`);
+        setErpManualSyncError(parts.join("; "));
       }
     } catch {
       setErpManualSyncError("Network error — please try again.");
@@ -1518,11 +1556,11 @@ export function SystemSettingsPage() {
           <>
             <SectionHeader
               title="ERP Sync"
-              description="Configure automatic stock synchronization from the external ERP system."
+              description="Configure automatic stock and sales synchronization from the external ERP system."
             />
             <FieldRow
               label="Auto Sync"
-              description="Automatically sync stock data from ERP system"
+              description="Automatically sync stock and sales data from ERP system"
               saved={s("erp_sync_enabled")}
             >
               <button
@@ -1554,7 +1592,7 @@ export function SystemSettingsPage() {
             {v("erp_sync_enabled") === "true" ? (
               <FieldRow
                 label="Sync interval"
-                description="How often to pull stock data from ERP when auto sync is enabled."
+                description="How often to pull stock and sales data from ERP when auto sync is enabled."
                 saved={s("erp_sync_interval_minutes")}
               >
                 <select
@@ -1579,7 +1617,16 @@ export function SystemSettingsPage() {
               <p className="mt-0.5 text-xs text-stone-500">
                 {erpSyncStatusLoading
                   ? "Loading sync status…"
-                  : `Last Stock Sync: ${formatLastStockSync(erpSyncStatus?.lastStockSync)}`}
+                  : formatLastStockSync(erpSyncStatus?.lastStockSync)}
+              </p>
+            </div>
+
+            <div className="border-b border-stone-100/80 px-5 py-3 sm:px-7">
+              <p className="text-sm font-semibold text-stone-800">Last Sales Sync</p>
+              <p className="mt-0.5 text-xs text-stone-500">
+                {erpSyncStatusLoading
+                  ? "Loading sync status…"
+                  : formatLastStockSync(erpSyncStatus?.lastSalesSync)}
               </p>
             </div>
 
@@ -1587,12 +1634,16 @@ export function SystemSettingsPage() {
               <div className="min-w-0">
                 <p className="text-sm font-semibold text-stone-800">Manual sync</p>
                 <p className="mt-0.5 text-xs text-stone-500">
-                  Pull the latest stock data from ERP immediately.
+                  Pull the latest stock and sales data from ERP immediately.
                 </p>
                 {lastSyncResult ? (
                   <p className="mt-2 text-xs font-medium text-stone-700">
-                    Last sync: {lastSyncResult.updated} updated, {lastSyncResult.inserted} new,{" "}
-                    {lastSyncResult.errors.length} errors
+                    Last sync: {lastSyncResult.stockUpdated + lastSyncResult.stockInserted} stock,{" "}
+                    {lastSyncResult.salesUpdated + lastSyncResult.salesInserted} sales
+                    {lastSyncResult.clientsCreated > 0
+                      ? `, ${lastSyncResult.clientsCreated} new clients`
+                      : ""}
+                    , {lastSyncResult.errors.length} errors
                   </p>
                 ) : null}
                 {erpManualSyncError ? (
@@ -1602,21 +1653,15 @@ export function SystemSettingsPage() {
               <button
                 type="button"
                 disabled={erpManualSyncing}
-                onClick={() => void handleManualStockSync()}
+                onClick={() => void handleManualErpSync()}
                 className="flex shrink-0 items-center gap-2 rounded-xl bg-violet-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 <RefreshCw
                   className={`size-4 ${erpManualSyncing ? "animate-spin" : ""}`}
                   aria-hidden
                 />
-                {erpManualSyncing ? "Syncing…" : "Sync Stock Now"}
+                {erpManualSyncing ? "Syncing…" : "Sync ERP Now"}
               </button>
-            </div>
-
-            <div className="px-5 py-3 sm:px-7">
-              <p className="text-xs italic text-stone-500">
-                Sales sync — coming soon (awaiting PARTY_CODE field from API team)
-              </p>
             </div>
           </>
         )}

@@ -20,7 +20,8 @@
     "test:load": "artillery run tests/load/artillery.yml",
     "test:all": "jest --coverage && playwright test",
     "test:watch": "jest --watch",
-    "test:coverage": "jest --coverage"
+    "test:coverage": "jest --coverage",
+    "test:allocation": "npx tsx scripts/test-allocation.ts"
   },
   "dependencies": {
     "@dicebear/collection": "^9.4.2",

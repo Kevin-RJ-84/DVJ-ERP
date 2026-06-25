@@ -1,15 +1,52 @@
 import { NextRequest, NextResponse } from "next/server";
-import { Prisma } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { requireAuth } from "@/lib/auth-server";
 import { requirePermission, ForbiddenError } from "@/lib/rbac";
 import { resolveClientInvoiceNos } from "@/lib/replenishment-pending-invoices";
 import { classifyItemStatus, userDisplayName } from "@/lib/replenishment-item-status";
 
-type InvoiceGroupRow = {
-  invoiceNo: string;
+type HistoryGroupRow = {
+  type: "invoice" | "style_upload";
+  groupKey: string;
   latestAt: Date;
 };
+
+function extractMetalTypeFromGroupValue(groupValue: string): string | null {
+  const part = groupValue.split("·")[1]?.trim();
+  if (!part || part === "(any)") return null;
+  return part;
+}
+
+function buildItemWhere(
+  clientId: string | undefined,
+  clientInvoiceNos: string[] | undefined,
+  invoiceOrRef: string | undefined,
+): Prisma.replenishment_itemsWhereInput {
+  const base: Prisma.replenishment_itemsWhereInput = {
+    IsActive: true,
+    Replenishment: { IsUndone: false },
+  };
+
+  if (invoiceOrRef) {
+    base.OR = [{ InvoiceNo: invoiceOrRef }, { StyleUploadRef: invoiceOrRef }];
+    return base;
+  }
+
+  if (clientId && clientInvoiceNos) {
+    base.OR = [
+      { ClientID: clientId, StyleUploadRef: { not: null } },
+      { StyleUploadRef: null, InvoiceNo: { in: clientInvoiceNos } },
+    ];
+    return base;
+  }
+
+  if (clientId) {
+    base.ClientID = clientId;
+  }
+
+  return base;
+}
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request);
@@ -31,69 +68,110 @@ export async function GET(request: NextRequest) {
   const skip = (page - 1) * limit;
 
   let clientInvoiceNos: string[] | undefined;
-  if (clientId) {
+  if (clientId && !invoiceNo) {
     const invoiceNos = await resolveClientInvoiceNos(clientId);
     if (invoiceNos === null) {
       return NextResponse.json({ message: "Client not found." }, { status: 404 });
     }
     if (invoiceNos.length === 0) {
-      return NextResponse.json({ total: 0, page, limit, items: [] });
+      const styleUploadOnly = await db.replenishment_items.count({
+        where: {
+          IsActive: true,
+          Replenishment: { IsUndone: false },
+          ClientID: clientId,
+          StyleUploadRef: { not: null },
+        },
+      });
+      if (styleUploadOnly === 0) {
+        return NextResponse.json({ total: 0, page, limit, items: [] });
+      }
     }
     clientInvoiceNos = invoiceNos;
   }
 
-  const invoiceFilter =
-    invoiceNo && clientInvoiceNos
-      ? clientInvoiceNos.includes(invoiceNo)
-        ? [invoiceNo]
-        : []
-      : invoiceNo
-        ? [invoiceNo]
-        : clientInvoiceNos;
+  const itemWhere = buildItemWhere(clientId, clientInvoiceNos, invoiceNo);
+  if (
+    clientId &&
+    clientInvoiceNos &&
+    clientInvoiceNos.length === 0 &&
+    !invoiceNo
+  ) {
+    itemWhere.OR = [{ ClientID: clientId, StyleUploadRef: { not: null } }];
+  }
 
-  if (invoiceFilter && invoiceFilter.length === 0) {
+  if (
+    clientId &&
+    clientInvoiceNos &&
+    clientInvoiceNos.length === 0 &&
+    invoiceNo
+  ) {
     return NextResponse.json({ total: 0, page, limit, items: [] });
   }
 
-  const invoiceInClause =
-    invoiceFilter && invoiceFilter.length > 0
-      ? Prisma.sql`AND ri."InvoiceNo" IN (${Prisma.join(invoiceFilter)})`
-      : Prisma.empty;
+  const matchingItems = await db.replenishment_items.findMany({
+    where: itemWhere,
+    select: {
+      ItemID: true,
+      InvoiceNo: true,
+      StyleUploadRef: true,
+      ReplenishmentType: true,
+      CreatedAt: true,
+      Replenishment: { select: { ReplenishedAt: true } },
+    },
+  });
 
-  const [countRow, invoiceRows] = await db.$transaction([
-    db.$queryRaw<Array<{ count: bigint }>>`
-      SELECT COUNT(DISTINCT ri."InvoiceNo")::bigint AS count
-      FROM replenishment_items ri
-      INNER JOIN replenishments r ON r."ReplenishmentID" = ri."ReplenishmentID"
-      WHERE r."IsUndone" = false
-      ${invoiceInClause}
-    `,
-    db.$queryRaw<InvoiceGroupRow[]>`
-      SELECT ri."InvoiceNo" AS "invoiceNo", MAX(r."ReplenishedAt") AS "latestAt"
-      FROM replenishment_items ri
-      INNER JOIN replenishments r ON r."ReplenishmentID" = ri."ReplenishmentID"
-      WHERE r."IsUndone" = false
-      ${invoiceInClause}
-      GROUP BY ri."InvoiceNo"
-      ORDER BY "latestAt" DESC
-      LIMIT ${limit} OFFSET ${skip}
-    `,
-  ]);
+  const groupMap = new Map<string, { type: "invoice" | "style_upload"; latestAt: Date }>();
+  for (const row of matchingItems) {
+    const isStyleUpload = Boolean(row.StyleUploadRef);
+    const type: "invoice" | "style_upload" = isStyleUpload ? "style_upload" : "invoice";
+    const groupKey = isStyleUpload ? row.StyleUploadRef! : row.InvoiceNo;
+    const latestAt = row.Replenishment.ReplenishedAt;
+    const existing = groupMap.get(groupKey);
+    if (!existing || latestAt > existing.latestAt) {
+      groupMap.set(groupKey, { type, latestAt });
+    }
+  }
 
-  const total = Number(countRow[0]?.count ?? 0);
-  if (invoiceRows.length === 0) {
+  const sortedGroups: HistoryGroupRow[] = [...groupMap.entries()]
+    .map(([groupKey, meta]) => ({
+      type: meta.type,
+      groupKey,
+      latestAt: meta.latestAt,
+    }))
+    .sort((a, b) => b.latestAt.getTime() - a.latestAt.getTime());
+
+  const total = sortedGroups.length;
+  const pageGroups = sortedGroups.slice(skip, skip + limit);
+
+  if (pageGroups.length === 0) {
     return NextResponse.json({ total, page, limit, items: [] });
   }
 
-  const pageInvoiceNos = invoiceRows.map((r) => r.invoiceNo);
+  const pageInvoiceNos = pageGroups.filter((g) => g.type === "invoice").map((g) => g.groupKey);
+  const pageStyleUploadRefs = pageGroups.filter((g) => g.type === "style_upload").map((g) => g.groupKey);
+
+  const groupOr: Prisma.replenishment_itemsWhereInput[] = [];
+  if (pageInvoiceNos.length > 0) {
+    groupOr.push({
+      StyleUploadRef: null,
+      InvoiceNo: { in: pageInvoiceNos },
+    });
+  }
+  if (pageStyleUploadRefs.length > 0) {
+    groupOr.push({
+      StyleUploadRef: { in: pageStyleUploadRefs },
+    });
+  }
 
   const itemRows = await db.replenishment_items.findMany({
     where: {
-      InvoiceNo: { in: pageInvoiceNos },
+      IsActive: true,
       Replenishment: { IsUndone: false },
+      OR: groupOr,
     },
-    orderBy: [{ InvoiceNo: "asc" }, { CreatedAt: "asc" }],
+    orderBy: [{ CreatedAt: "asc" }],
     include: {
+      Client: { select: { PartyName: true } },
       Replenishment: {
         include: {
           ReplenishedByUser: {
@@ -105,11 +183,16 @@ export async function GET(request: NextRequest) {
   });
 
   const stockNos = [
-    ...new Set(itemRows.map((r) => r.StockNo).filter((sn) => sn && sn !== "—")),
+    ...new Set(itemRows.map((r) => r.StockNo).filter((sn) => sn && sn !== "—" && sn !== "-")),
   ];
   const stockByNo = new Map<
     string,
-    { ProductDescription: string | null; MetalType: string | null; MetalPurity: string | null }
+    {
+      ProductDescription: string | null;
+      MetalType: string | null;
+      MetalPurity: string | null;
+      HoldCompany: string | null;
+    }
   >();
   if (stockNos.length > 0) {
     const stockRows = await db.stock.findMany({
@@ -119,55 +202,73 @@ export async function GET(request: NextRequest) {
         ProductDescription: true,
         MetalType: true,
         MetalPurity: true,
+        HoldCompany: true,
       },
     });
     for (const s of stockRows) stockByNo.set(s.StockNo, s);
   }
 
   const partyByInvoice = new Map<string, string>();
-  const salesRows = await db.sales.findMany({
-    where: { InvoiceNo: { in: pageInvoiceNos } },
-    select: { InvoiceNo: true, PartyName: true },
-    distinct: ["InvoiceNo", "PartyName"],
-  });
-  for (const s of salesRows) {
-    if (!partyByInvoice.has(s.InvoiceNo) && s.PartyName?.trim()) {
-      partyByInvoice.set(s.InvoiceNo, s.PartyName.trim());
+  if (pageInvoiceNos.length > 0) {
+    const salesRows = await db.sales.findMany({
+      where: { InvoiceNo: { in: pageInvoiceNos } },
+      select: { InvoiceNo: true, PartyName: true },
+      distinct: ["InvoiceNo", "PartyName"],
+    });
+    for (const s of salesRows) {
+      if (!partyByInvoice.has(s.InvoiceNo) && s.PartyName?.trim()) {
+        partyByInvoice.set(s.InvoiceNo, s.PartyName.trim());
+      }
     }
   }
 
-  const itemsByInvoice = new Map<string, typeof itemRows>();
+  const itemsByGroup = new Map<string, typeof itemRows>();
   for (const row of itemRows) {
-    const list = itemsByInvoice.get(row.InvoiceNo) ?? [];
+    const groupKey = row.StyleUploadRef ?? row.InvoiceNo;
+    const list = itemsByGroup.get(groupKey) ?? [];
     list.push(row);
-    itemsByInvoice.set(row.InvoiceNo, list);
+    itemsByGroup.set(groupKey, list);
   }
 
-  const items = invoiceRows.map(({ invoiceNo: inv, latestAt }) => {
-    const lines = itemsByInvoice.get(inv) ?? [];
+  const items = pageGroups.map(({ type, groupKey, latestAt }) => {
+    const lines = itemsByGroup.get(groupKey) ?? [];
     let confirmedCount = 0;
     let factoryCount = 0;
     let pendingCount = 0;
+    let soldCount = 0;
+    let rescanableCount = 0;
 
     const mappedItems = lines.map((line) => {
-      const bucket = classifyItemStatus(line.Status);
-      if (bucket === "confirmed") confirmedCount += 1;
-      else if (bucket === "factory") factoryCount += 1;
-      else if (bucket === "pending") pendingCount += 1;
+      const status = line.Status.toLowerCase();
+      if (status === "sold") {
+        soldCount += 1;
+      } else {
+        rescanableCount += 1;
+        const bucket = classifyItemStatus(line.Status);
+        if (bucket === "confirmed") confirmedCount += 1;
+        else if (bucket === "factory") factoryCount += 1;
+        else if (bucket === "pending") pendingCount += 1;
+      }
 
       const stock = line.StockNo ? stockByNo.get(line.StockNo) : undefined;
       const byUser = line.Replenishment.ReplenishedByUser;
+      const metalType =
+        stock?.MetalType ?? extractMetalTypeFromGroupValue(line.GroupValue) ?? null;
 
       return {
         itemId: line.ItemID,
         styleNo: line.StyleNo,
+        metalType,
         status: line.Status,
         stockNo: line.StockNo,
+        holdCompany: stock?.HoldCompany ?? null,
         productDescription: stock?.ProductDescription ?? null,
-        metalType: stock?.MetalType ?? null,
         metalPurity: stock?.MetalPurity ?? null,
         replenishedByName: userDisplayName(byUser),
         replenishedAt: line.Replenishment.ReplenishedAt.toISOString(),
+        rescanCount: line.RescanCount,
+        lastRescannedAt: line.LastRescannedAt?.toISOString() ?? null,
+        canRescan: status !== "sold",
       };
     });
 
@@ -177,16 +278,25 @@ export async function GET(request: NextRequest) {
     }, null);
 
     const headerUser = latestLine?.Replenishment.ReplenishedByUser;
+    const partyName =
+      type === "style_upload"
+        ? latestLine?.Client?.PartyName?.trim() ?? lines[0]?.Client?.PartyName?.trim() ?? "—"
+        : partyByInvoice.get(groupKey) ?? "—";
 
     return {
-      invoiceNo: inv,
-      partyName: partyByInvoice.get(inv) ?? "—",
+      type,
+      invoiceNo: type === "invoice" ? groupKey : null,
+      styleUploadRef: type === "style_upload" ? groupKey : null,
+      replenishmentType: type,
+      partyName,
       replenishedAt: latestAt.toISOString(),
       replenishedByName: headerUser ? userDisplayName(headerUser) : "—",
       totalItems: lines.length,
       confirmedCount,
       factoryCount,
       pendingCount,
+      soldCount,
+      rescanableCount,
       items: mappedItems,
     };
   });

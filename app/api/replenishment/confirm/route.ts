@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { REPLENISHMENT_GROUP_FIELDS, type ReplenishmentGroupField } from "@/lib/replenishment-v2";
+import { generateStyleUploadRef } from "@/lib/replenishment-utils";
 import { requireAuth } from "@/lib/auth-server";
 import { requirePermission, ForbiddenError } from "@/lib/rbac";
 import type { Prisma } from "@prisma/client";
@@ -75,6 +76,11 @@ const bodySchema = z.object({
         confirmedPullbackItems: z.array(pullbackItemSchema).optional().default([]),
         pullbackChangeHistory: z.array(pullbackChangeHistoryEntrySchema).optional().default([]),
         pullbackContactLogs: z.array(pullbackContactLogBucketSchema).optional().default([]),
+        replenishmentType: z.enum(["invoice", "style_upload"]).optional().default("invoice"),
+        styleUploadClientId: z.string().uuid().nullable().optional(),
+        styleUploadClientName: z.string().nullable().optional(),
+        holdAlloc: z.number().int().min(0).optional().default(0),
+        holdPillStockNos: z.array(z.string().min(1)).optional().default([]),
       }),
     )
     .min(1),
@@ -97,7 +103,10 @@ async function resolveStyleNo(
   groupValue: string,
   invoiceNos: string[],
 ): Promise<string> {
-  if (groupField === "StyleNo") return groupValue;
+  if (groupField === "StyleNo") {
+    const stylePart = groupValue.split("·")[0]?.trim();
+    return stylePart || groupValue;
+  }
   if (invoiceNos.length === 0) return groupValue;
   const invWhere: Prisma.salesWhereInput = { InvoiceNo: { in: invoiceNos } };
 
@@ -138,12 +147,15 @@ type ItemDraft = {
   GroupField: string;
   GroupValue: string;
   StockNo: string;
-  Type: "warehouse" | "pullback" | "memo" | "factory";
+  Type: "warehouse" | "pullback" | "memo" | "factory" | "hold";
   ReplenishedBy: string;
   styleNo: string;
   Status: string;
   PullbackCandidateCount: number;
   pullbackMemoNo?: string;
+  replenishmentType: "invoice" | "style_upload";
+  styleUploadRef: string | null;
+  clientId: string | null;
 };
 
 function logResponseKey(resp: string): string {
@@ -161,11 +173,13 @@ function lastLogResponse(row: ParsedRow, stockNo: string): string | null {
 
 function getConfirmStatus(row: ParsedRow): string {
   const { memoAlloc, stockAlloc, factoryAllocDisplay, pullbackAvail } = row.allocation;
+  const holdAlloc = row.holdAlloc ?? 0;
   const badge = row.pullbackBadge;
   const warehouseCount = row.stockNos.filter((s) => s.type === "warehouse").length;
 
   if (warehouseCount > 0) return "stock";
   if (memoAlloc > 0 && stockAlloc === 0) return "memo";
+  if (holdAlloc > 0 && memoAlloc === 0 && stockAlloc === 0) return "hold";
   if (badge === "pullback_confirmed") return "pullback_confirmed";
   if (badge === "pb_in_progress") return "pending_pullback";
   if (badge === "pullback_available" && !row.skippedPullback) return "pullback_available";
@@ -179,15 +193,20 @@ function buildItemDrafts(
   rows: ParsedRow[],
   userId: string,
   styleByGroupValue: Map<string, string>,
+  batchStyleUploadRef: string | null,
 ): ItemDraft[] {
   const out: ItemDraft[] = [];
 
   for (const row of rows) {
     const styleNo = styleByGroupValue.get(row.groupValue) ?? row.groupValue;
     const { memoAlloc, pullAlloc, factoryAllocDisplay, pullbackAvail } = row.allocation;
+    const holdAlloc = row.holdAlloc ?? 0;
     const badge = row.pullbackBadge;
     const warehouseStocks = row.stockNos.filter((s) => s.type === "warehouse");
     const candidateCount = pullbackAvail;
+    const replenishmentType = row.replenishmentType ?? "invoice";
+    const clientId = row.styleUploadClientId ?? null;
+    const styleUploadRef = replenishmentType === "style_upload" ? batchStyleUploadRef : null;
 
     for (const invoiceNo of row.invoiceNos) {
       for (const { stockNo } of warehouseStocks) {
@@ -201,6 +220,9 @@ function buildItemDrafts(
           styleNo,
           Status: "stock",
           PullbackCandidateCount: candidateCount,
+          replenishmentType,
+          styleUploadRef,
+          clientId,
         });
       }
 
@@ -216,6 +238,27 @@ function buildItemDrafts(
           styleNo,
           Status: "memo",
           PullbackCandidateCount: candidateCount,
+          replenishmentType,
+          styleUploadRef,
+          clientId,
+        });
+      }
+
+      for (let i = 0; i < holdAlloc; i++) {
+        const holdStock = row.holdPillStockNos[i] ?? row.holdPillStockNos[0] ?? "—";
+        out.push({
+          InvoiceNo: invoiceNo,
+          GroupField: groupField,
+          GroupValue: row.groupValue,
+          StockNo: holdStock,
+          Type: "hold",
+          ReplenishedBy: userId,
+          styleNo,
+          Status: "hold",
+          PullbackCandidateCount: candidateCount,
+          replenishmentType,
+          styleUploadRef,
+          clientId,
         });
       }
 
@@ -236,6 +279,9 @@ function buildItemDrafts(
           Status: status,
           PullbackCandidateCount: candidateCount,
           pullbackMemoNo: pb.MemoNo,
+          replenishmentType,
+          styleUploadRef,
+          clientId,
         });
       }
 
@@ -254,6 +300,9 @@ function buildItemDrafts(
             styleNo,
             Status: "pullback_available",
             PullbackCandidateCount: candidateCount,
+            replenishmentType,
+            styleUploadRef,
+            clientId,
           });
         }
       }
@@ -270,6 +319,9 @@ function buildItemDrafts(
             styleNo,
             Status: "pending_pullback",
             PullbackCandidateCount: candidateCount,
+            replenishmentType,
+            styleUploadRef,
+            clientId,
           });
         }
       }
@@ -285,6 +337,9 @@ function buildItemDrafts(
           styleNo,
           Status: "factory_order",
           PullbackCandidateCount: candidateCount,
+          replenishmentType,
+          styleUploadRef,
+          clientId,
         });
       }
 
@@ -308,11 +363,19 @@ function buildItemDrafts(
           GroupField: groupField,
           GroupValue: row.groupValue,
           StockNo: "—",
-          Type: fallback === "factory_order" ? "factory" : "pullback",
+          Type:
+            fallback === "factory_order"
+              ? "factory"
+              : fallback === "hold"
+                ? "hold"
+                : "pullback",
           ReplenishedBy: userId,
           styleNo,
           Status: fallback,
           PullbackCandidateCount: candidateCount,
+          replenishmentType,
+          styleUploadRef,
+          clientId,
         });
       }
     }
@@ -358,7 +421,7 @@ function countByStatus(items: ItemDraft[]) {
 
   for (const item of items) {
     const s = item.Status;
-    if (s === "stock" || s === "memo" || s === "pullback_confirmed") confirmedCount += 1;
+    if (s === "stock" || s === "memo" || s === "hold" || s === "pullback_confirmed") confirmedCount += 1;
     else if (s === "pending_pullback") pendingPullbackCount += 1;
     else if (s === "factory_order") factoryOrderCount += 1;
     else if (s === "pullback" || s === "pullback_available") pullbackUnactionedCount += 1;
@@ -402,7 +465,18 @@ export async function POST(request: NextRequest) {
     styleByGroupValue.set(row.groupValue, sn);
   }
 
-  const itemDrafts = buildItemDrafts(groupField, rows, auth.userId, styleByGroupValue);
+  const styleUploadRow = rows.find((r) => r.replenishmentType === "style_upload");
+  const batchStyleUploadRef = styleUploadRow
+    ? generateStyleUploadRef(styleUploadRow.styleUploadClientName ?? "UNKNOWN")
+    : null;
+
+  const itemDrafts = buildItemDrafts(
+    groupField,
+    rows,
+    auth.userId,
+    styleByGroupValue,
+    batchStyleUploadRef,
+  );
 
   if (itemDrafts.length === 0) {
     return NextResponse.json({ message: "No replenishment records to save." }, { status: 400 });
@@ -465,6 +539,9 @@ export async function POST(request: NextRequest) {
                 ? "confirmed"
                 : null,
           CreatedBy: auth.userId,
+          ReplenishmentType: r.replenishmentType,
+          StyleUploadRef: r.styleUploadRef,
+          ClientID: r.clientId,
         };
       });
 

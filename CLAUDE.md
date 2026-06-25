@@ -45,7 +45,7 @@ app/
 │   ├── clients/page.tsx
 │   ├── excel-config/page.tsx
 │   ├── replenishment/
-│   │   ├── client/page.tsx       ← Replenishment V2 (+ History tab in-app)
+│   │   ├── client/page.tsx       ← Replenishment V2 (+ History tab; **By Style** upload mode)
 │   │   └── stock/page.tsx        ← Stock replenishment
 │   ├── stock-review/page.tsx
 │   ├── admin/
@@ -63,7 +63,7 @@ app/
 │   ├── excel-config/
 │   ├── permissions/
 │   ├── rankings/recalculate/
-│   ├── replenishment/{v2,calculate,confirm,undo,history,history/replenishers,options}/
+│   ├── replenishment/{v2,calculate,confirm,undo,history,history/replenishers,options,style-upload}/
 │   ├── roles/
 │   ├── settings/
 │   ├── stock/
@@ -141,7 +141,7 @@ Defined in `components/layout/DashboardSidebar.tsx` with permission gating:
 |------|---------|---------------------|
 | `/` | Redirect → `/dashboard` | (n/a) |
 | `/dashboard` | Metrics hub + quick actions | `dashboard.view` or `replenishment.view` (see layout) |
-| `/replenishment/client` | Replenishment V2 (primary); **History** tab in-page | `replenishment.view` / `replenishment_history.view` (see sidebar) |
+| `/replenishment/client` | Replenishment V2 (primary); **History** tab in-page; **By Style** upload mode | `replenishment.view` / `replenishment_history.view` (see sidebar) |
 | `/replenishment/stock` | Stock replenishment report | `stock_replenishment.view` or `replenishment.view` |
 | `/clients` | Client directory / party defaults | `clients.view` |
 | `/excel-config` | Excel column → DB field mapping | `excel_config.view` |
@@ -167,6 +167,7 @@ Defined in `components/layout/DashboardSidebar.tsx` with permission gating:
 | `api/upload` | GET, POST | `upload.stock`, `upload.sales` |
 | `api/settings` | GET, PATCH | `settings.view`, `settings.edit` |
 | `api/replenishment/v2` | GET | `replenishment.view` |
+| `api/replenishment/style-upload` | POST | `replenishment.view`, `replenishment.search` |
 | `api/replenishment/calculate` | POST | `replenishment.view` |
 | `api/replenishment/confirm` | POST | `replenishment.confirm` |
 | `api/replenishment/undo` | POST | `replenishment.undo` |
@@ -192,35 +193,44 @@ Defined in `components/layout/DashboardSidebar.tsx` with permission gating:
    - **Pullback ranking sort:** pullback items sorted by `OverallRank ASC NULLS LAST`, `StyleRank ASC NULLS LAST` from `customer_rankings`.
    - **Confirm flow:** Confirm Replenishment button POSTs to `/api/replenishment/confirm`; saves one `replenishments` row per (invoiceNo × stockNo). Export PDF enabled only after confirm.
 
-2. **Replenishment History**
+2. **Style upload (By Style mode on `/replenishment/client`)**
+   - UI: **By Style** search mode in `components/replenishment/ReplenishmentV2Page.tsx` (same page as client/invoice search; not a separate route).
+   - API: `POST /api/replenishment/style-upload` — accepts Excel/CSV (`StyleNo` required; `MetalType` optional — empty matches any metal; `Qty` optional, default 1) + optional `clientId` form field.
+   - Optional **Client / Company** autocomplete (`/api/clients?q=…`, min 3 chars) — when set, hold items for that client are allocated first.
+   - Sample template download: `DVJ-style-upload-template.xlsx` (client-side via exceljs).
+   - **Hold priority** (when client selected): stock with `HoldDate` set and `HoldCompany` matching client `PartyName` (case-insensitive) → memo → warehouse → pullback → factory order.
+   - **Stock fields (ERP):** `HoldCompany` ← ERP `HOLD_REMARK`; `MemoPrice` ← ERP `MEMO_PRICE` (see `lib/erp-sync.ts`).
+   - Hold items show **On Hold** badge (pink) and pink stock pills in results; confirm replenishment is not available in By Style mode (planning only).
+
+3. **Replenishment History**
    - UI: `components/replenishment/ReplenishmentHistoryTab.tsx` (embedded **History** tab on `/replenishment/client`) and `ReplenishmentHistoryPage.tsx` (same data surface where reused)
    - API: `app/api/replenishment/history/route.ts` + `history/replenishers/route.ts`
    - Paginated view of past replenishments with per-row undo capability (permission-gated).
 
-3. **Customer Rankings**
+4. **Customer Rankings**
    - Logic: `lib/rankings.ts` — `recalculateRankings()` uses SQL CTEs with `RANK()` window functions.
    - Table: `customer_rankings` with `OverallRank` (global client rank) and `StyleRank` (per-style rank across clients). Overall rows have `StyleNo = NULL`; style rows have `StyleRank` set and `OverallRank` duplicated for debug.
    - Triggered after every sales upload and on demand via `POST /api/rankings/recalculate`.
    - Config-driven: `ranking_value_metric` (SaleValue | Profit), `ranking_value_weight`, `ranking_period` (all_time | yearly | monthly) from `system_config`.
 
-4. **System config**
+5. **System config**
    - Lib: `lib/config.ts` — `getConfig`, `getConfigBool`, `getConfigInt`, `getConfigDecimal`; 60s in-memory cache on `globalThis`.
    - Admin UI: `components/settings/SystemSettingsPage.tsx` — 4 tabs (Replenishment, Ranking, Permissions, System) with 1s debounced auto-save.
    - API: `app/api/settings/route.ts` — PATCH invalidates config cache; triggers ranking recalc if a ranking key changed.
 
-5. **Roles Management**
+6. **Roles Management**
    - UI: `components/roles/RolesManagement.tsx`
    - Page: `app/(dashboard)/admin/roles/page.tsx`
    - Two-panel: role list (name, user count, `IsSystem` badge, inline Create Role form) + permission checkboxes grouped by module with Save / Delete.
    - System roles (`IsSystem: true`) are read-only and cannot be deleted.
 
-6. **Clients** — `components/clients/ClientManagement.tsx`, `app/(dashboard)/clients/page.tsx`, `app/api/clients/route.ts`.
+7. **Clients** — `components/clients/ClientManagement.tsx`, `app/(dashboard)/clients/page.tsx`, `app/api/clients/route.ts`.
 
-7. **Excel map config** — `components/excel-config/ExcelConfigManager.tsx`, `app/(dashboard)/excel-config/page.tsx`, `lib/excel-config.ts`, `app/api/excel-config/route.ts`, table `excel_mappings`.
+8. **Excel map config** — `components/excel-config/ExcelConfigManager.tsx`, `app/(dashboard)/excel-config/page.tsx`, `lib/excel-config.ts`, `app/api/excel-config/route.ts`, table `excel_mappings`.
 
-8. **Users & invitations** — `app/(dashboard)/admin/users/page.tsx`, `app/api/users/route.ts` (`sendEmail` after create). Role assignment dropdown pulls from `roles` table.
+9. **Users & invitations** — `app/(dashboard)/admin/users/page.tsx`, `app/api/users/route.ts` (`sendEmail` after create). Role assignment dropdown pulls from `roles` table.
 
-9. **Auth** — `lib/auth.ts`, `lib/auth-server.ts`, `lib/auth-session.ts`, routes under `app/api/auth/`.
+10. **Auth** — `lib/auth.ts`, `lib/auth-server.ts`, `lib/auth-session.ts`, routes under `app/api/auth/`.
 
 ## Coding rules (practical)
 

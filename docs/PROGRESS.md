@@ -435,3 +435,36 @@ Source: `docs/changes/CHANGES-10.md`. All parts implemented; build verified (`np
 ### Part 12 — APIs + permissions ✅
 - **`GET /api/replenishment/pending-count`**, **`pending-invoices`**, **`pending-pullbacks`**, **`factory-orders`**, **`factory-orders/mark-ordered`**
 - **`prisma/seed.ts`:** `replenishment.view_pending_pullbacks`, `view_factory_orders`, `mark_factory_ordered`, `export_confirmed`, `export_factory_orders` (member: all replenishment; viewer: view screens only)
+
+---
+
+## CHANGES-12 — Confirm overhaul + style upload confirm + rescan ✅ — Jun 2026
+
+Source: `docs/changes/CHANGES-12.md`. All parts implemented; build verified (`npm run build`); seed run (`npx prisma db seed` — 43 permissions).
+
+### Part 1 — Schema ✅
+- **`replenishment_items`:** `ReplenishmentType`, `StyleUploadRef`, `RescanCount`, `LastRescannedAt`, `LastRescannedBy`, `ClientID`
+- **`replenishment_rescan_log`** table
+- Migrations: `changes12_confirm_rescan`, `changes12_replenishment_client_id`
+
+### Part 2 — Style upload ref ✅
+- **`lib/replenishment-utils.ts`:** `generateStyleUploadRef()` — `{ClientNameNoSpaces}_{YYYYMMDD}`
+
+### Part 3 — Style upload confirm UI ✅
+- **`components/replenishment/ReplenishmentV2Page.tsx`:** confirm enabled in style upload mode; footer visible; payload with `STYLE-UPLOAD` invoice ref + hold fields; clear-on-success toast
+
+### Part 4 — Confirm API ✅
+- **`app/api/replenishment/confirm/route.ts`:** batch `StyleUploadRef`; hold status; saves `ReplenishmentType`, `StyleUploadRef`, `ClientID`
+
+### Part 5 — Rescan API ✅
+- **`app/api/replenishment/rescan/route.ts`:** POST by `itemIds` / `invoiceNo` / `styleUploadRef` / `all`; locked vs open rescan logic; status + rescan logs
+
+### Part 6 — History tab upgrade ✅
+- **`app/api/replenishment/history/route.ts`:** groups by invoice or `StyleUploadRef`; `soldCount`, `rescanableCount`, `canRescan`, hold/sold fields
+- **`components/replenishment/ReplenishmentHistoryTab.tsx`:** Rescan All / Group / Item; style upload chip; sold + hold badges; local state updates + highlight animation
+
+### Part 7 — Permission ✅
+- **`prisma/seed.ts`:** `replenishment.rescan` (super_admin, admin, member: yes; viewer: no)
+
+### Supporting ✅
+- **`lib/replenishment-item-status.ts`:** `hold` counted as confirmed status

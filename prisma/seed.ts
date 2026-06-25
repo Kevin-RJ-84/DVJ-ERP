@@ -34,6 +34,7 @@ const PERMISSIONS: { key: string; module: string; description: string }[] = [
   { key: "replenishment.override_qty", module: "replenishment",        description: "Override replenishment quantity" },
   { key: "replenishment.toggle_stock", module: "replenishment",        description: "Toggle stock pill selection" },
   { key: "replenishment.confirm",      module: "replenishment",        description: "Confirm and save a replenishment" },
+  { key: "replenishment.rescan",       module: "replenishment",        description: "Rescan replenishment items for status updates" },
   { key: "replenishment.export_pdf",   module: "replenishment",        description: "Export replenishment PDF" },
   { key: "replenishment.undo",         module: "replenishment",        description: "Undo a confirmed replenishment" },
   { key: "replenishment.log_pullback_contact", module: "replenishment", description: "Log pullback contact attempts" },
@@ -185,6 +186,8 @@ const SYSTEM_CONFIG = [
   { key: "erp_sync_enabled",           value: "true", type: "boolean", module: "system", description: "Whether auto ERP sync is enabled" },
   { key: "erp_sync_interval_minutes",  value: "30",   type: "integer", module: "system", description: "Auto sync interval in minutes" },
   { key: "erp_last_stock_sync",        value: "",     type: "string",  module: "system", description: "Last successful stock sync timestamp" },
+  { key: "erp_last_sales_sync",        value: "",     type: "string",  module: "system", description: "Last successful sales sync timestamp" },
+  { key: "erp_sync_progress",          value: "0",    type: "integer", module: "system", description: "Current sync progress percentage 0-100" },
   // ranking
   { key: "use_combined_score",    value: "false",     type: "boolean", module: "ranking", description: "When ON, ranks by weighted combination of value + volume. When OFF, ranks purely by selected value metric." },
   { key: "ranking_value_metric",  value: "SaleValue", type: "enum",    module: "ranking", description: "Value metric used for ranking score: SaleValue | Profit" },

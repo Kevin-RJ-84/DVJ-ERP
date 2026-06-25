@@ -5,7 +5,17 @@
  */
 
 import { getConfig, getConfigBool, getConfigInt } from "@/lib/config";
-import { syncStockFromErp } from "@/lib/erp-sync";
+import { syncSalesFromErp, syncStockFromErp } from "@/lib/erp-sync";
+
+function minutesSince(iso: string): number {
+  const lastSync = new Date(iso);
+  return (Date.now() - lastSync.getTime()) / 1000 / 60;
+}
+
+function isSyncDue(lastSyncStr: string | null, intervalMinutes: number): boolean {
+  if (!lastSyncStr) return true;
+  return minutesSince(lastSyncStr) >= intervalMinutes;
+}
 
 export async function triggerAutoSyncIfDue(): Promise<void> {
   const erpConfigured = Boolean(
@@ -19,18 +29,25 @@ export async function triggerAutoSyncIfDue(): Promise<void> {
     const syncEnabled = await getConfigBool("erp_sync_enabled");
     if (!syncEnabled) return;
 
-    const lastSyncStr = await getConfig("erp_last_stock_sync");
+    const lastStockSyncStr = await getConfig("erp_last_stock_sync");
+    const lastSalesSyncStr = await getConfig("erp_last_sales_sync");
     const intervalMinutes = await getConfigInt("erp_sync_interval_minutes");
 
-    if (lastSyncStr) {
-      const lastSync = new Date(lastSyncStr);
-      const minutesSinceSync = (Date.now() - lastSync.getTime()) / 1000 / 60;
-      if (minutesSinceSync < intervalMinutes) return;
+    const stockDue = isSyncDue(lastStockSyncStr, intervalMinutes);
+    const salesDue = isSyncDue(lastSalesSyncStr, intervalMinutes);
+    if (!stockDue && !salesDue) return;
+
+    if (stockDue) {
+      syncStockFromErp().catch((err) => {
+        console.error("Auto ERP stock sync failed:", err);
+      });
     }
 
-    syncStockFromErp().catch((err) => {
-      console.error("Auto ERP sync failed:", err);
-    });
+    if (salesDue) {
+      syncSalesFromErp().catch((err) => {
+        console.error("Auto ERP sales sync failed:", err);
+      });
+    }
   } catch (err) {
     console.error("Auto sync check failed:", err);
   }

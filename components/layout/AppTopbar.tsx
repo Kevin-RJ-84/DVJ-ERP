@@ -27,6 +27,7 @@ type AppTopbarProps = { session: DashboardSession };
 
 type ErpSyncStatus = {
   lastStockSync: string | null;
+  lastSalesSync: string | null;
   syncEnabled: boolean;
   intervalMinutes: number;
 };
@@ -81,8 +82,11 @@ export function AppTopbar({ session }: AppTopbarProps) {
     (isLegacyAdmin ||
       sessionHasPermission(session, "upload.stock") ||
       sessionHasPermission(session, "upload.sales"));
-  const canSyncStock =
-    Boolean(session) && (isLegacyAdmin || sessionHasPermission(session, "upload.stock"));
+  const canSyncErp =
+    Boolean(session) &&
+    (isLegacyAdmin ||
+      sessionHasPermission(session, "upload.stock") ||
+      sessionHasPermission(session, "upload.sales"));
 
   useEffect(() => {
     setToolbarHydrated(true);
@@ -90,7 +94,7 @@ export function AppTopbar({ session }: AppTopbarProps) {
   }, []);
 
   useEffect(() => {
-    if (!canSyncStock) return;
+    if (!canSyncErp) return;
     let cancelled = false;
     void fetch("/api/erp/sync/status")
       .then((res) => (res.ok ? res.json() : null))
@@ -101,7 +105,7 @@ export function AppTopbar({ session }: AppTopbarProps) {
     return () => {
       cancelled = true;
     };
-  }, [canSyncStock]);
+  }, [canSyncErp]);
 
   useEffect(() => {
     if (!toast) return;
@@ -112,21 +116,48 @@ export function AppTopbar({ session }: AppTopbarProps) {
   const handleManualSync = useCallback(async () => {
     setIsSyncing(true);
     try {
-      const res = await fetch("/api/erp/sync/stock", { method: "POST" });
-      const data = await res.json();
-      if (data.success) {
+      const [stockRes, salesRes] = await Promise.all([
+        fetch("/api/erp/sync/stock", { method: "POST" }),
+        fetch("/api/erp/sync/sales", { method: "POST" }),
+      ]);
+      const stockData = await stockRes.json();
+      const salesData = await salesRes.json();
+
+      const stockOk = stockData.success === true;
+      const salesOk = salesData.success === true;
+
+      if (stockOk || salesOk) {
+        const stockCount = (stockData.updated ?? 0) + (stockData.inserted ?? 0);
+        const salesCount = (salesData.updated ?? 0) + (salesData.inserted ?? 0);
         setToast({
           type: "success",
-          message: `Synced: ${data.updated} updated, ${data.inserted} new items`,
+          message: `Synced: ${stockCount} stock updated, ${salesCount} sales updated`,
         });
         const syncedAt = new Date().toISOString();
         setSyncStatus((prev) =>
           prev
-            ? { ...prev, lastStockSync: syncedAt }
-            : { lastStockSync: syncedAt, syncEnabled: true, intervalMinutes: 30 },
+            ? {
+                ...prev,
+                lastStockSync: stockOk ? syncedAt : prev.lastStockSync,
+                lastSalesSync: salesOk ? syncedAt : prev.lastSalesSync,
+              }
+            : {
+                lastStockSync: stockOk ? syncedAt : null,
+                lastSalesSync: salesOk ? syncedAt : null,
+                syncEnabled: true,
+                intervalMinutes: 30,
+              },
         );
-      } else {
-        setToast({ type: "error", message: `Sync failed: ${data.error ?? "Unknown error"}` });
+      }
+
+      if (!stockOk && !salesOk) {
+        const errMsg = stockData.error ?? salesData.error ?? "Unknown error";
+        setToast({ type: "error", message: `Sync failed: ${errMsg}` });
+      } else if (!stockOk || !salesOk) {
+        const parts: string[] = [];
+        if (!stockOk) parts.push(`Stock: ${stockData.error ?? stockData.message ?? "failed"}`);
+        if (!salesOk) parts.push(`Sales: ${salesData.error ?? salesData.message ?? "failed"}`);
+        setToast({ type: "error", message: parts.join("; ") });
       }
     } catch (err) {
       setToast({ type: "error", message: `Sync failed: ${String(err)}` });
@@ -243,19 +274,21 @@ export function AppTopbar({ session }: AppTopbarProps) {
             <UploadModal mode="controlled" open={uploadOpen} onClose={() => setUploadOpen(false)} />
           ) : null}
 
-          {canSyncStock ? (
+          {canSyncErp ? (
             <button
               type="button"
               onClick={() => void handleManualSync()}
               disabled={isSyncing}
               title={
                 isSyncing
-                  ? "Syncing stock from ERP…"
-                  : syncStatus?.lastStockSync
-                    ? formatRelativeSyncTime(syncStatus.lastStockSync)
-                    : "Sync stock from ERP"
+                  ? "Syncing from ERP…"
+                  : syncStatus?.lastStockSync || syncStatus?.lastSalesSync
+                    ? formatRelativeSyncTime(
+                        syncStatus.lastStockSync ?? syncStatus.lastSalesSync ?? "",
+                      )
+                    : "Sync ERP"
               }
-              aria-label={isSyncing ? "Syncing stock from ERP" : "Sync stock from ERP"}
+              aria-label={isSyncing ? "Syncing from ERP" : "Sync ERP"}
               className="clay-raised flex size-10 items-center justify-center rounded-full transition hover:scale-[1.03] disabled:cursor-not-allowed disabled:opacity-50"
             >
               <RefreshCw

@@ -15,7 +15,9 @@ import {
   Search,
   Table2,
   X,
+  Download,
 } from "lucide-react";
+import ExcelJS from "exceljs";
 import {
   useCallback,
   useEffect,
@@ -31,6 +33,7 @@ import {
   type ReplenishmentGroupField,
   type ReplenishmentV2ApiPayload,
   type ReplenishmentV2RawSoldItem,
+  type StyleUploadGroupMeta,
 } from "@/lib/replenishment-v2";
 import {
   currentStatusLabel,
@@ -42,7 +45,7 @@ import {
 } from "@/lib/replenishment-exports";
 import type { DashboardSession } from "@/components/layout/dashboard-session";
 import { sessionHasPermission } from "@/lib/nav-permissions";
-import { btnGhost, btnPrimary } from "@/lib/ui-styles";
+import { btnGhost, btnPrimary, btnSecondary } from "@/lib/ui-styles";
 import { cn } from "@/lib/utils";
 import { PullbackContactLogModal, type PullbackContactLogEntry } from "./PullbackContactLogModal";
 import { PullbackDrawer, pullbackRowKey } from "./PullbackDrawer";
@@ -107,6 +110,16 @@ type TableRow = Omit<ReplenishmentV2ApiPayload["rows"][number], "inWarehouseItem
   pullbackContactLogs: PullbackContactLogBucket[];
   /** User chose to skip pullback allocation for this row (CHANGES-7). */
   skippedPullback: boolean;
+  /** Style upload — hold items allocated for selected client (CHANGES-11). */
+  holdItems?: WarehouseTableItem[];
+  holdAvail?: number;
+  holdPillStockNos?: string[];
+  selectedHoldStockNos?: Set<string>;
+  holdAlloc?: number;
+  /** Style upload — server-computed memo allocation (CHANGES-11). */
+  memoAlloc?: number;
+  /** Style upload — alternate metal suggestion when row is factory order. */
+  suggestion?: StyleUploadGroupMeta["suggestion"];
   /** Set after confirm — drives disabled row UI (CHANGES-10). */
   savedStatus?: string | null;
   savedStockNo?: string | null;
@@ -362,6 +375,22 @@ function maskUsDateInput(value: string): string {
   return `${month}/${day}${year.length > 0 ? `/${year}` : "/"}`;
 }
 
+const CALENDAR_MONTH_OPTIONS = Array.from({ length: 12 }, (_, month) => ({
+  value: month,
+  label: new Date(2000, month, 1).toLocaleString("en-US", { month: "long" }),
+}));
+
+function calendarYearOptions(anchorYear: number): number[] {
+  const currentYear = new Date().getFullYear();
+  const minYear = Math.min(anchorYear, currentYear) - 30;
+  const maxYear = Math.max(anchorYear, currentYear) + 1;
+  const years: number[] = [];
+  for (let year = maxYear; year >= minYear; year -= 1) {
+    years.push(year);
+  }
+  return years;
+}
+
 function buildCalendarGrid(monthDate: Date) {
   const y = monthDate.getFullYear();
   const m = monthDate.getMonth();
@@ -430,6 +459,12 @@ function DatePickerInput({
     month: "long",
     year: "numeric",
   });
+  const calendarYears = useMemo(
+    () => calendarYearOptions(displayMonth.getFullYear()),
+    [displayMonth],
+  );
+  const calendarSelectClass =
+    "h-8 min-w-0 flex-1 rounded-md border border-border bg-card px-2 text-xs font-semibold text-foreground outline-none focus:border-foreground/25 focus:ring-2 focus:ring-ring/20";
   const grid = buildCalendarGrid(displayMonth);
   const selectedIso = selectedDate ? toIsoDateLocal(selectedDate) : null;
   const todayIso = toIsoDateLocal(new Date());
@@ -483,7 +518,7 @@ function DatePickerInput({
 
         {open ? (
           <div className="absolute left-0 z-30 mt-2 w-[290px] rounded-xl border border-border bg-card p-3 shadow-xl">
-            <div className="mb-2 flex items-center justify-between">
+            <div className="mb-2 flex items-center justify-between gap-1">
               <button
                 type="button"
                 onClick={() =>
@@ -491,12 +526,43 @@ function DatePickerInput({
                     (d) => new Date(d.getFullYear(), d.getMonth() - 1, 1),
                   )
                 }
-                className="rounded-md p-1 hover:bg-secondary"
+                className="shrink-0 rounded-md p-1 hover:bg-secondary"
                 aria-label="Previous month"
               >
                 <ChevronLeft className="size-4" />
               </button>
-              <p className="text-sm font-semibold text-foreground">{monthLabel}</p>
+              <div className="flex min-w-0 flex-1 items-center gap-1">
+                <select
+                  value={displayMonth.getMonth()}
+                  onChange={(event) => {
+                    const month = Number(event.target.value);
+                    setDisplayMonth((current) => new Date(current.getFullYear(), month, 1));
+                  }}
+                  className={calendarSelectClass}
+                  aria-label={`Select month, currently ${monthLabel}`}
+                >
+                  {CALENDAR_MONTH_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={displayMonth.getFullYear()}
+                  onChange={(event) => {
+                    const year = Number(event.target.value);
+                    setDisplayMonth((current) => new Date(year, current.getMonth(), 1));
+                  }}
+                  className={`${calendarSelectClass} max-w-[5.5rem]`}
+                  aria-label={`Select year, currently ${monthLabel}`}
+                >
+                  {calendarYears.map((year) => (
+                    <option key={year} value={year}>
+                      {year}
+                    </option>
+                  ))}
+                </select>
+              </div>
               <button
                 type="button"
                 onClick={() =>
@@ -504,7 +570,7 @@ function DatePickerInput({
                     (d) => new Date(d.getFullYear(), d.getMonth() + 1, 1),
                   )
                 }
-                className="rounded-md p-1 hover:bg-secondary"
+                className="shrink-0 rounded-md p-1 hover:bg-secondary"
                 aria-label="Next month"
               >
                 <ChevronRight className="size-4" />
@@ -619,6 +685,59 @@ function normalizeMetalType(value: string | null | undefined): string {
   return (value ?? "").trim().toUpperCase();
 }
 
+function matchesMetalType(stockMetalType: string | null, uploadMetalType: string | null): boolean {
+  if (!uploadMetalType || uploadMetalType.trim() === "") return true;
+  return normalizeMetalType(stockMetalType) === normalizeMetalType(uploadMetalType);
+}
+
+function matchesStyleUploadLine(
+  stockStyleNo: string | null,
+  uploadStyleNo: string | null,
+  stockMetalType: string | null,
+  uploadMetalType: string | null,
+): boolean {
+  const style = uploadStyleNo?.trim();
+  if (!style) return false;
+  const stockStyle = stockStyleNo?.trim();
+  if (!stockStyle || stockStyle.toUpperCase() !== style.toUpperCase()) return false;
+  return matchesMetalType(stockMetalType, uploadMetalType);
+}
+
+function buildSoldStyleMetalPairKeys(
+  soldInGroup: ReplenishmentV2ApiPayload["raw"]["soldItems"],
+): Set<string> {
+  const keys = new Set<string>();
+  for (const item of soldInGroup) {
+    const styleNo = item.groupValues.StyleNo?.trim();
+    const metalType = item.groupValues.MetalType?.trim();
+    if (styleNo && metalType) {
+      keys.add(`${styleNo.toUpperCase()}\0${metalType.toUpperCase()}`);
+    }
+  }
+  return keys;
+}
+
+function holdMatchesSoldStyleMetalPairs(
+  hold: { styleNo: string | null; metalType: string | null },
+  pairs: Set<string>,
+): boolean {
+  const styleNo = hold.styleNo?.trim();
+  const metalType = hold.metalType?.trim();
+  if (!styleNo || !metalType) return false;
+  return pairs.has(`${styleNo.toUpperCase()}\0${metalType.toUpperCase()}`);
+}
+
+function maxHoldSelectable(row: TableRow, replenPartyNorm: string): number {
+  const hasParty = replenPartyNorm.length > 0;
+  const clientMemoQty = hasParty
+    ? row.pullbackItems.filter((p) => normalizeReplenParty(p.PartyName) === replenPartyNorm).length
+    : 0;
+  let remaining = row.overrideQty;
+  remaining -= Math.min(remaining, clientMemoQty);
+  const holdAvail = row.holdAvail ?? row.holdItems?.length ?? 0;
+  return Math.min(remaining, holdAvail);
+}
+
 function formatDistinctSet(label: string, values: Set<string>, maxShow = 3): string | null {
   if (values.size === 0) return null;
   const sorted = [...values].sort((a, b) => a.localeCompare(b));
@@ -702,7 +821,7 @@ function abbreviateClientName(name: string | null | undefined): string {
   return `${t.slice(0, 10)}…`;
 }
 
-/** Step 3.2 — client-side replenishment allocations (memo → stock pullback → external pullback → factory). */
+/** Step 3.2 — client-side replenishment allocations (memo → hold → stock → pullback → factory). */
 function computeAllocationBreakdown(row: TableRow, replenPartyNorm: string) {
   const hasParty = replenPartyNorm.length > 0;
   const clientMemoQty = hasParty
@@ -712,13 +831,22 @@ function computeAllocationBreakdown(row: TableRow, replenPartyNorm: string) {
     ? row.pullbackItems.filter((p) => normalizeReplenParty(p.PartyName) !== replenPartyNorm).length
     : row.pullbackItems.length;
 
+  const holdAvail = row.holdAvail ?? row.holdItems?.length ?? 0;
   const inWarehouse = row.selectedWarehouseStockNos.size;
 
   const effectivePullbackAvail = row.skippedPullback ? 0 : pullbackAvail;
 
   let remainingDisplay = row.overrideQty;
-  const memoAllocDisplay = Math.min(remainingDisplay, clientMemoQty);
+  const memoAllocDisplay =
+    row.memoAlloc !== undefined
+      ? Math.min(row.overrideQty, row.memoAlloc)
+      : Math.min(remainingDisplay, clientMemoQty);
   remainingDisplay -= memoAllocDisplay;
+  const holdAllocDisplay =
+    row.holdAlloc !== undefined
+      ? Math.min(remainingDisplay, row.holdAlloc)
+      : Math.min(remainingDisplay, holdAvail);
+  remainingDisplay -= holdAllocDisplay;
   const stockAllocDisplay = Math.min(remainingDisplay, inWarehouse);
   remainingDisplay -= stockAllocDisplay;
   const pullAllocDisplay = Math.min(remainingDisplay, effectivePullbackAvail);
@@ -727,6 +855,7 @@ function computeAllocationBreakdown(row: TableRow, replenPartyNorm: string) {
 
   let remainingActual = row.overrideQty;
   remainingActual -= memoAllocDisplay;
+  remainingActual -= holdAllocDisplay;
   remainingActual -= stockAllocDisplay;
   const pullbackSlotActual = Math.min(remainingActual, pullbackAvail);
   const pullbackUsed = Math.min(pullbackSlotActual, row.confirmedPullbackItems.length);
@@ -735,6 +864,8 @@ function computeAllocationBreakdown(row: TableRow, replenPartyNorm: string) {
 
   return {
     memoAlloc: memoAllocDisplay,
+    holdAlloc: holdAllocDisplay,
+    holdAvail,
     stockAlloc: stockAllocDisplay,
     pullAlloc: pullAllocDisplay,
     pullbackAvail,
@@ -748,6 +879,12 @@ const STATUS_BADGE_WRAP =
   "inline-flex shrink-0 items-center whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-semibold";
 
 const BADGE_CONFIG = {
+  hold: {
+    label: "On Hold",
+    dot: "bg-pink-600",
+    className: "bg-[#FCE7F3] text-[#9D174D]",
+    clickable: false as const,
+  },
   memo: {
     label: "Memo",
     dot: "bg-violet-500",
@@ -795,6 +932,7 @@ const BADGE_CONFIG = {
 type StatusBadgeType = keyof typeof BADGE_CONFIG;
 type SingleRowStatus =
   | "memo"
+  | "hold"
   | "stock"
   | "pullback_available"
   | "pullback_confirmed"
@@ -828,8 +966,9 @@ function computeConfirmSummary(rows: TableRow[], replenPartyNorm: string) {
   let units = 0;
   for (const row of rows) {
     if (row.overrideQty <= 0) continue;
-    const a = singleStatusAllocation(row, replenPartyNorm);
-    const rowUnits = a.memoAlloc + a.stockAlloc + a.pullAlloc + a.factoryAllocDisplay;
+    const base = computeAllocationBreakdown(row, replenPartyNorm);
+    const rowUnits =
+      base.memoAlloc + base.holdAlloc + base.stockAlloc + base.pullAlloc + base.factoryAllocDisplay;
     if (rowUnits > 0) {
       lines += 1;
       units += rowUnits;
@@ -986,7 +1125,7 @@ function derivePullbackBadgeState(
 
 function deriveSingleRowStatus(row: TableRow, replenPartyNorm: string): SingleRowStatus {
   const saved = row.savedStatus;
-  if (saved === "memo" || saved === "stock" || saved === "pullback_confirmed" || saved === "factory_order_placed") {
+  if (saved === "memo" || saved === "hold" || saved === "stock" || saved === "pullback_confirmed" || saved === "factory_order_placed") {
     return saved;
   }
   if (saved === "pending_pullback" || saved === "pb_in_progress") {
@@ -994,8 +1133,11 @@ function deriveSingleRowStatus(row: TableRow, replenPartyNorm: string): SingleRo
   }
 
   const allocation = computeAllocationBreakdown(row, replenPartyNorm);
-  if (allocation.clientMemoQty > 0) {
+  if (allocation.memoAlloc > 0) {
     return "memo";
+  }
+  if (allocation.holdAlloc > 0) {
+    return "hold";
   }
   if (row.selectedWarehouseStockNos.size > 0) {
     return "stock";
@@ -1023,7 +1165,8 @@ function singleStatusAllocation(row: TableRow, replenPartyNorm: string) {
 
   return {
     status,
-    memoAlloc: status === "memo" ? Math.min(row.overrideQty, base.clientMemoQty) : 0,
+    memoAlloc: status === "memo" ? Math.min(row.overrideQty, base.memoAlloc || base.clientMemoQty) : 0,
+    holdAlloc: status === "hold" ? Math.min(row.overrideQty, base.holdAlloc) : 0,
     stockAlloc: status === "stock" ? Math.min(row.overrideQty, row.selectedWarehouseStockNos.size) : 0,
     pullAlloc: isPullbackStatus
       ? Math.max(row.confirmedPullbackItems.length, Math.min(row.overrideQty, base.pullbackAvail))
@@ -1037,6 +1180,36 @@ function singleStatusAllocation(row: TableRow, replenPartyNorm: string) {
 function shouldShowStockPills(row: TableRow, status: SingleRowStatus, ui: RowUiState) {
   if (ui.isDisabled || row.warehousePillStockNos.length === 0) return false;
   return status === "stock" || status === "pullback_available" || status === "factory_order";
+}
+
+function StyleUploadSuggestionCell({
+  row,
+}: {
+  row: TableRow;
+  replenPartyNorm: string;
+}) {
+  const suggestion = row.suggestion;
+  if (row.factoryOrder <= 0 || !suggestion) {
+    return <span className="text-xs text-stone-400">—</span>;
+  }
+
+  const pillText = suggestion.metalType
+    ? `${suggestion.stockNo} · ${suggestion.metalType}`
+    : suggestion.stockNo;
+
+  const variant =
+    suggestion.source === "hold" ? "hold" : ("warehouse" as const);
+
+  return (
+    <StockPillGroup
+      allStockNos={[suggestion.stockNo]}
+      selectedStockNos={new Set([suggestion.stockNo])}
+      onToggle={() => {}}
+      variant={variant}
+      displayText={pillText}
+      readOnly
+    />
+  );
 }
 
 function selectedStockText(row: TableRow) {
@@ -1125,10 +1298,11 @@ function deriveRowUiState(row: TableRow, replenPartyNorm: string): RowUiState {
   const candidateCount = row.savedPullbackCandidateCount ?? computeAllocationBreakdown(row, replenPartyNorm).pullbackAvail;
 
   if (status) {
-    if (["stock", "memo", "pullback_confirmed", "factory_order_placed"].includes(status)) {
+    if (["stock", "memo", "hold", "pullback_confirmed", "factory_order_placed"].includes(status)) {
       const chips: Record<string, string> = {
         stock: row.savedStockNo ? `✅ Stocked · ${row.savedStockNo}` : "✅ Stocked",
         memo: "✅ Memo",
+        hold: "✅ Hold",
         pullback_confirmed: "✅ Pulled Back",
         factory_order_placed: "🏭 Ordered",
       };
@@ -1316,12 +1490,15 @@ function ResultColumnMenuTh({
 
 function StatusBadge({
   type,
+  count,
   onClick,
 }: {
   type: StatusBadgeType;
+  count?: number;
   onClick?: () => void;
 }) {
   const cfg = BADGE_CONFIG[type];
+  const label = count != null && count > 1 ? `${cfg.label} ×${count}` : cfg.label;
   const wrap = cn(
     STATUS_BADGE_WRAP,
     "gap-1.5 px-2.5 py-1",
@@ -1330,7 +1507,7 @@ function StatusBadge({
   const content = (
     <>
       <span className={cn("size-2 shrink-0 rounded-full", cfg.dot)} aria-hidden />
-      {cfg.label}
+      {label}
     </>
   );
   if (cfg.clickable && onClick) {
@@ -1358,8 +1535,9 @@ function ReplenishmentStatusCell({
   const [restoreOpen, setRestoreOpen] = useState(false);
 
   const allocation = computeAllocationBreakdown(row, replenPartyNorm);
-  const { pullbackAvail } = allocation;
+  const { pullbackAvail, holdAlloc, memoAlloc, stockAlloc, pullAlloc, factoryAllocDisplay } = allocation;
   const singleStatus = deriveSingleRowStatus(row, replenPartyNorm);
+  const showAllocationBreakdown = memoAlloc > 0 || holdAlloc > 0;
   const badge =
     singleStatus === "pending_pullback"
       ? "pb_in_progress"
@@ -1423,7 +1601,25 @@ function ReplenishmentStatusCell({
   return (
     <>
       <div className="flex max-w-[14rem] flex-wrap gap-1">
-        <StatusBadge type={badge} onClick={onBadgeClick} />
+        {showAllocationBreakdown ? (
+          <>
+            {memoAlloc > 0 ? <StatusBadge type="memo" count={memoAlloc} /> : null}
+            {holdAlloc > 0 ? <StatusBadge type="hold" count={holdAlloc} /> : null}
+            {stockAlloc > 0 ? <StatusBadge type="stock" count={stockAlloc} /> : null}
+            {pullAlloc > 0 ? (
+              <StatusBadge
+                type={singleStatus === "pullback_confirmed" ? "pullback_confirmed" : "pullback_available"}
+                count={pullAlloc}
+                onClick={onBadgeClick}
+              />
+            ) : null}
+            {factoryAllocDisplay > 0 ? (
+              <StatusBadge type="factory_order_final" count={factoryAllocDisplay} />
+            ) : null}
+          </>
+        ) : (
+          <StatusBadge type={badge} onClick={onBadgeClick} />
+        )}
       </div>
       {skipOpen ? (
         <div
@@ -1507,7 +1703,33 @@ function ReplenishmentStatusCell({
   );
 }
 
-function regroup(payload: ReplenishmentV2ApiPayload, groupBy: ReplenishmentGroupField): TableRow[] {
+function countClientMemoForRegroup(
+  clientMemoItems: ReplenishmentV2ApiPayload["raw"]["clientMemoItems"],
+  groupBy: ReplenishmentGroupField,
+  groupValue: string,
+  soldInGroup: ReplenishmentV2ApiPayload["raw"]["soldItems"],
+): number {
+  if (!clientMemoItems?.length) return 0;
+  const soldMetalTypes = new Set(
+    soldInGroup
+      .map((item) => normalizeMetalType(item.groupValues.MetalType))
+      .filter((metalType) => metalType.length > 0),
+  );
+  return clientMemoItems.filter((item) => {
+    if (normalizeGroupValue(item.groupValues[groupBy]) !== groupValue) return false;
+    const metalType = normalizeMetalType(item.groupValues.MetalType);
+    if (soldMetalTypes.size > 0 && (metalType.length === 0 || !soldMetalTypes.has(metalType))) {
+      return false;
+    }
+    return true;
+  }).length;
+}
+
+function regroup(
+  payload: ReplenishmentV2ApiPayload,
+  groupBy: ReplenishmentGroupField,
+  replenPartyNorm = "",
+): TableRow[] {
   const soldByGroup = new Map<string, number>();
   const invoiceNosByGroup = new Map<string, Set<string>>();
   for (const item of payload.raw.soldItems) {
@@ -1577,10 +1799,41 @@ function regroup(payload: ReplenishmentV2ApiPayload, groupBy: ReplenishmentGroup
           ProductType: item.groupValues.ProductType,
           ProductStyle: item.groupValues.ProductStyle,
         }));
+      const soldStyleMetalPairs = buildSoldStyleMetalPairKeys(soldInGroup);
+      const holdItems = (payload.raw.holdItems ?? [])
+        .filter(
+          (item) =>
+            normalizeGroupValue(item.groupValues[groupBy]) === groupValue &&
+            holdMatchesSoldStyleMetalPairs(item, soldStyleMetalPairs),
+        )
+        .map((item) => ({
+          StockNo: item.stockNo,
+          ProductDescription: item.productDescription ?? null,
+          Location: item.location ?? null,
+          BoxCode: item.boxCode ?? null,
+          StyleNo: item.groupValues.StyleNo,
+          StoneShape: item.groupValues.StoneShape,
+          Metal: item.groupValues.Metal,
+          MetalType: item.groupValues.MetalType,
+          ProductType: item.groupValues.ProductType,
+          ProductStyle: item.groupValues.ProductStyle,
+        }));
+      const holdAvail = holdItems.length;
+      const apiRow = payload.rows.find((row) => normalizeGroupValue(row.groupValue) === groupValue);
+      const memoFromRaw = Math.min(
+        soldQty,
+        countClientMemoForRegroup(payload.raw.clientMemoItems, groupBy, groupValue, soldInGroup),
+      );
+      const memoAlloc = apiRow?.memoAlloc ?? memoFromRaw;
+      let remaining = soldQty;
+      remaining -= memoAlloc;
+      const holdAlloc = Math.min(remaining, holdAvail);
+      const holdPillStockNos = holdItems.slice(0, holdAlloc).map((item) => item.StockNo);
+      remaining -= holdAlloc;
       const inWarehouse = inWarehouseItems.length;
       const pullbackAvailable = pullbackItems.length;
       const warehousePool = inWarehouseItems.map((i) => i.StockNo);
-      const pillCount = Math.min(soldQty, warehousePool.length);
+      const pillCount = Math.min(remaining, warehousePool.length);
       const warehousePillStockNos = pickRandom(warehousePool, pillCount);
       const selectedWarehouseStockNos = new Set(warehousePillStockNos);
       return {
@@ -1594,9 +1847,15 @@ function regroup(payload: ReplenishmentV2ApiPayload, groupBy: ReplenishmentGroup
         overrideQty: soldQty,
         inWarehouse,
         pullbackAvailable,
-        factoryOrder: Math.max(0, soldQty - selectedWarehouseStockNos.size),
+        factoryOrder: Math.max(0, soldQty - holdAlloc - selectedWarehouseStockNos.size),
         inWarehouseItems,
         pullbackItems,
+        holdItems,
+        holdAvail,
+        holdPillStockNos,
+        selectedHoldStockNos: new Set(holdPillStockNos),
+        holdAlloc,
+        memoAlloc,
         productSummary,
         warehousePillStockNos,
         selectedWarehouseStockNos,
@@ -1623,10 +1882,23 @@ type StyleUploadSummary = {
 };
 
 function styleUploadGroupKey(styleNo: string | null, metalType: string | null) {
-  return `${styleNo?.trim() || "(blank)"} · ${metalType?.trim() || "(blank)"}`;
+  return `${styleNo?.trim() || "(blank)"} · ${metalType?.trim() || "(any)"}`;
 }
 
-function regroupStyleUpload(payload: ReplenishmentV2ApiPayload): TableRow[] {
+function styleUploadMetaForGroup(
+  payload: ReplenishmentV2ApiPayload,
+  styleNo: string | null,
+  metalType: string | null,
+): StyleUploadGroupMeta | undefined {
+  const key = styleUploadGroupKey(styleNo, metalType);
+  return payload.raw.styleUploadGroups?.find((group) => group.groupKey === key);
+}
+
+function styleUploadServerMemoAlloc(groupMeta: StyleUploadGroupMeta | undefined): number | undefined {
+  return groupMeta?.memoAlloc;
+}
+
+function regroupStyleUpload(payload: ReplenishmentV2ApiPayload, replenPartyNorm = ""): TableRow[] {
   const soldByGroup = new Map<string, ReplenishmentV2ApiPayload["raw"]["soldItems"]>();
   for (const item of payload.raw.soldItems) {
     const key = styleUploadGroupKey(item.groupValues.StyleNo, item.groupValues.MetalType);
@@ -1640,10 +1912,16 @@ function regroupStyleUpload(payload: ReplenishmentV2ApiPayload): TableRow[] {
       const first = soldInGroup[0];
       const styleNo = first?.groupValues.StyleNo?.trim() || null;
       const metalType = first?.groupValues.MetalType?.trim() || null;
-      const soldQty = soldInGroup.length;
+      const soldQty = soldInGroup.reduce((sum, item) => sum + (item.uploadQty ?? 1), 0);
       const matchesUploadLine = (value: { groupValues: Record<ReplenishmentGroupField, string | null> }) =>
-        normalizeGroupValue(value.groupValues.StyleNo) === normalizeGroupValue(styleNo) &&
-        normalizeMetalType(value.groupValues.MetalType) === normalizeMetalType(metalType);
+        matchesStyleUploadLine(
+          value.groupValues.StyleNo,
+          styleNo,
+          value.groupValues.MetalType,
+          metalType,
+        );
+
+      const groupMeta = styleUploadMetaForGroup(payload, styleNo, metalType);
 
       const inWarehouseItems = payload.raw.inWarehouseItems
         .filter(matchesUploadLine)
@@ -1683,8 +1961,33 @@ function regroupStyleUpload(payload: ReplenishmentV2ApiPayload): TableRow[] {
           ProductType: item.groupValues.ProductType,
           ProductStyle: item.groupValues.ProductStyle,
         }));
+
+      const holdItems = (payload.raw.holdItems ?? [])
+        .filter(matchesUploadLine)
+        .map((item) => ({
+          StockNo: item.stockNo,
+          ProductDescription: item.productDescription ?? null,
+          Location: item.location ?? null,
+          BoxCode: item.boxCode ?? null,
+          StyleNo: item.groupValues.StyleNo,
+          StoneShape: item.groupValues.StoneShape,
+          Metal: item.groupValues.Metal,
+          MetalType: item.groupValues.MetalType,
+          ProductType: item.groupValues.ProductType,
+          ProductStyle: item.groupValues.ProductStyle,
+        }));
+      const holdAvail = holdItems.length;
+      const memoAlloc = styleUploadServerMemoAlloc(groupMeta);
+      let remaining = soldQty;
+      remaining -= memoAlloc ?? 0;
+      const holdAlloc = groupMeta?.holdAlloc ?? Math.min(remaining, holdAvail);
+      const holdPillStockNos = holdItems.slice(0, holdAlloc).map((item) => item.StockNo);
+      remaining -= holdAlloc;
+
       const warehousePool = inWarehouseItems.map((item) => item.StockNo);
-      const warehousePillStockNos = pickRandom(warehousePool, Math.min(soldQty, warehousePool.length));
+      const warehousePickCount = Math.min(remaining, warehousePool.length);
+      const warehousePillStockNos = pickRandom(warehousePool, warehousePickCount);
+      const metalLabel = metalType?.trim() ? metalType : "any metal";
 
       return {
         groupValue,
@@ -1693,10 +1996,17 @@ function regroupStyleUpload(payload: ReplenishmentV2ApiPayload): TableRow[] {
         overrideQty: soldQty,
         inWarehouse: inWarehouseItems.length,
         pullbackAvailable: pullbackItems.length,
-        factoryOrder: Math.max(0, soldQty - warehousePillStockNos.length),
+        factoryOrder: Math.max(0, soldQty - holdAlloc - warehousePillStockNos.length),
         inWarehouseItems,
         pullbackItems,
-        productSummary: `Style: ${styleNo ?? "—"} · Metal type: ${metalType ?? "—"}`,
+        holdItems,
+        holdAvail,
+        holdPillStockNos,
+        selectedHoldStockNos: new Set(holdPillStockNos),
+        holdAlloc: groupMeta?.holdAlloc,
+        memoAlloc,
+        suggestion: groupMeta?.suggestion ?? null,
+        productSummary: `Style: ${styleNo ?? "—"} · Metal type: ${metalLabel}`,
         warehousePillStockNos,
         selectedWarehouseStockNos: new Set(warehousePillStockNos),
         invoiceNos: ["STYLE-UPLOAD"],
@@ -1766,6 +2076,13 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
   const [invoiceSearchSummary, setInvoiceSearchSummary] = useState<InvoiceSearchSummary | null>(null);
   const [styleUploadFile, setStyleUploadFile] = useState<File | null>(null);
   const [styleUploadSummary, setStyleUploadSummary] = useState<StyleUploadSummary | null>(null);
+  const [styleUploadClient, setStyleUploadClient] = useState("");
+  const [styleUploadClientId, setStyleUploadClientId] = useState<string | null>(null);
+  const [styleClientResults, setStyleClientResults] = useState<ClientOption[]>([]);
+  const [styleClientSuggestionsOpen, setStyleClientSuggestionsOpen] = useState(false);
+  const [styleClientLoading, setStyleClientLoading] = useState(false);
+  const [styleClientHighlightIndex, setStyleClientHighlightIndex] = useState(0);
+  const styleClientSuggestRef = useRef<HTMLDivElement | null>(null);
   const [clientSearch, setClientSearch] = useState("");
   const [clientId, setClientId] = useState("");
   const [clientSuggestions, setClientSuggestions] = useState<ClientOption[]>([]);
@@ -1840,6 +2157,10 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
   }, [clientSuggestions]);
 
   useEffect(() => {
+    queueMicrotask(() => setStyleClientHighlightIndex(0));
+  }, [styleClientResults]);
+
+  useEffect(() => {
     if (!suggestionsOpen) return;
     function onDocMouseDown(event: MouseEvent) {
       if (!clientSuggestRef.current) return;
@@ -1850,6 +2171,18 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
     document.addEventListener("mousedown", onDocMouseDown);
     return () => document.removeEventListener("mousedown", onDocMouseDown);
   }, [suggestionsOpen]);
+
+  useEffect(() => {
+    if (!styleClientSuggestionsOpen) return;
+    function onDocMouseDown(event: MouseEvent) {
+      if (!styleClientSuggestRef.current) return;
+      if (event.target instanceof Node && !styleClientSuggestRef.current.contains(event.target)) {
+        setStyleClientSuggestionsOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onDocMouseDown);
+    return () => document.removeEventListener("mousedown", onDocMouseDown);
+  }, [styleClientSuggestionsOpen]);
 
   useEffect(() => {
     if (!toast) return;
@@ -1960,8 +2293,11 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
   const exportDisplayName = styleUploadSummary ? "By Style" : (invoiceSearchSummary?.partyName ?? selectedClientName);
 
   const replenPartyKey = useMemo(
-    () => normalizeReplenParty(searchMode === "styleUpload" ? "" : exportDisplayName),
-    [exportDisplayName, searchMode],
+    () =>
+      normalizeReplenParty(
+        searchMode === "styleUpload" ? styleUploadClient : exportDisplayName,
+      ),
+    [exportDisplayName, searchMode, styleUploadClient],
   );
 
   const finalizeRowsForParty = useCallback((list: TableRow[], partyKey: string) => {
@@ -2056,15 +2392,24 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
   }, [pullbackDrawer, rows, replenPartyKey]);
 
   const canConfirmReplenishment = useMemo(
-    () =>
-      searchMode !== "styleUpload" &&
-      rows.some((row) => {
+    () => {
+      if (searchMode === "styleUpload") {
+        return Boolean(styleUploadClientId) && rows.some((row) => row.overrideQty > 0);
+      }
+      return rows.some((row) => {
         if (row.overrideQty <= 0) return false;
-        return ["memo", "stock", "pullback_available", "pullback_confirmed", "pending_pullback", "factory_order"].includes(
-          deriveSingleRowStatus(row, replenPartyKey),
-        );
-      }),
-    [rows, replenPartyKey, searchMode],
+        return [
+          "memo",
+          "hold",
+          "stock",
+          "pullback_available",
+          "pullback_confirmed",
+          "pending_pullback",
+          "factory_order",
+        ].includes(deriveSingleRowStatus(row, replenPartyKey));
+      });
+    },
+    [rows, replenPartyKey, searchMode, styleUploadClientId],
   );
 
   const confirmSummary = useMemo(
@@ -2116,6 +2461,75 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
     setClientSearch(client.PartyName);
     setClientSuggestions([]);
     setSuggestionsOpen(false);
+  }
+
+  function selectStyleClient(client: ClientOption) {
+    setStyleUploadClient(client.PartyName);
+    setStyleUploadClientId(client.ClientID);
+    setStyleClientResults([]);
+    setStyleClientSuggestionsOpen(false);
+  }
+
+  async function handleStyleClientSearch(query: string) {
+    setStyleUploadClient(query);
+    setStyleUploadClientId(null);
+    const q = query.trim();
+    if (q.length < 3) {
+      setStyleClientResults([]);
+      setStyleClientSuggestionsOpen(false);
+      return;
+    }
+    setStyleClientSuggestionsOpen(true);
+    setStyleClientLoading(true);
+    try {
+      const params = new URLSearchParams({ search: q, matchMode: "startsWith", limit: "8" });
+      const res = await fetch(`/api/clients?${params.toString()}`);
+      const payload = (await res.json()) as { clients: ClientOption[]; message?: string };
+      if (!res.ok) {
+        throw new Error(payload.message ?? "Could not load clients.");
+      }
+      setStyleClientResults(payload.clients);
+    } catch {
+      setStyleClientResults([]);
+    } finally {
+      setStyleClientLoading(false);
+    }
+  }
+
+  async function downloadStyleTemplate() {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet("Style Upload");
+    sheet.columns = [
+      { header: "StyleNo", key: "StyleNo", width: 20 },
+      { header: "MetalType", key: "MetalType", width: 15 },
+      { header: "Qty", key: "Qty", width: 10 },
+    ];
+    sheet.getRow(1).font = { bold: true };
+    sheet.getRow(1).fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFE8E3DC" },
+    };
+    sheet.addRow({ StyleNo: "KR09151BR46", MetalType: "14KY", Qty: 2 });
+    sheet.addRow({ StyleNo: "DVE075", MetalType: "", Qty: 1 });
+    sheet.addRow({ StyleNo: "KJN7265", MetalType: "14KW", Qty: 3 });
+    sheet.addRow({});
+    const noteRow = sheet.addRow({
+      StyleNo: "← Required",
+      MetalType: "← Optional (empty = any metal)",
+      Qty: "← Optional (default 1)",
+    });
+    noteRow.font = { italic: true, color: { argb: "FFA8A29E" } };
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "DVJ-style-upload-template.xlsx";
+    anchor.click();
+    URL.revokeObjectURL(url);
   }
 
   async function fetchClientSuggestions(query: string) {
@@ -2180,7 +2594,7 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
       const summary = payload.invoiceSearchSummary;
       const allocPk = normalizeReplenParty(summary?.partyName ?? "");
       const grouped = applyCompletedMetadata(
-        finalizeRowsForParty(regroup(payload, groupBy), allocPk),
+        finalizeRowsForParty(regroup(payload, groupBy, allocPk), allocPk),
         payload,
         groupBy,
       );
@@ -2253,7 +2667,11 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
         return;
       }
       setRawPayload(payload);
-      const grouped = applyCompletedMetadata(finalizeRows(regroup(payload, groupBy)), payload, groupBy);
+      const grouped = applyCompletedMetadata(
+        finalizeRows(regroup(payload, groupBy, replenPartyKey)),
+        payload,
+        groupBy,
+      );
       const idMap = await fetchPullbackItemIdByInvoiceStyle();
       setRows(attachPullbackItemIds(grouped, idMap));
       setRepPage(0);
@@ -2266,7 +2684,7 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
 
   async function runStyleUploadSearch() {
     if (!styleUploadFile) {
-      setError("Upload an Excel or CSV file with StyleNo and MetalType columns.");
+      setError("Upload an Excel or CSV file with a StyleNo column.");
       setHasSearched(false);
       return;
     }
@@ -2280,6 +2698,9 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
     try {
       const formData = new FormData();
       formData.set("file", styleUploadFile);
+      if (styleUploadClientId) {
+        formData.set("clientId", styleUploadClientId);
+      }
       const res = await fetch("/api/replenishment/style-upload", {
         method: "POST",
         body: formData,
@@ -2293,13 +2714,44 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
       setRawPayload(payload);
       setGroupBy("StyleNo");
       setStyleUploadSummary({ fileName: styleUploadFile.name, rowCount: payload.uploadedCount ?? payload.raw.soldItems.length });
-      setRows(finalizeRowsForParty(regroupStyleUpload(payload), ""));
+      const partyKey = styleUploadClientId ? normalizeReplenParty(styleUploadClient) : "";
+      setRows(finalizeRowsForParty(regroupStyleUpload(payload, partyKey), partyKey));
       setRepPage(0);
     } catch {
       setError("Unexpected network error.");
     } finally {
       setLoading(false);
     }
+  }
+
+  function clearSearchResults() {
+    setRows([]);
+    setHasSearched(false);
+    setRawPayload(null);
+    setConfirmed(false);
+    setExportSnapshot([]);
+    setInvoiceSearchSummary(null);
+    setStyleUploadSummary(null);
+    setStyleUploadClient("");
+    setStyleUploadClientId(null);
+    setStyleClientResults([]);
+    setStyleClientSuggestionsOpen(false);
+    setError(null);
+    setRepPage(0);
+    setPullbackDrawer(null);
+    setContactLogModal(null);
+    setChangeReasonModalGroup(null);
+    setSwapRejectedModal(null);
+    setRemoveConfirmDialog({ open: false, groupValue: "", item: null });
+    setRemoveReasonModal({ open: false, groupValue: "", item: null });
+    setConfirmWarningOpen(false);
+    setResultColumnFilters({});
+  }
+
+  function switchSearchMode(mode: "client" | "invoice" | "styleUpload") {
+    if (searchMode === mode) return;
+    clearSearchResults();
+    setSearchMode(mode);
   }
 
   async function handleSearch() {
@@ -2324,7 +2776,7 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
     if (searchMode === "styleUpload") return;
     setGroupBy(next);
     if (!rawPayload) return;
-    setRows(applyCompletedMetadata(finalizeRows(regroup(rawPayload, next)), rawPayload, next));
+    setRows(applyCompletedMetadata(finalizeRows(regroup(rawPayload, next, replenPartyKey)), rawPayload, next));
     setConfirmed(false);
     setToast(null);
     setRepPage(0);
@@ -2336,17 +2788,52 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
         prev.map((row) => {
           if (row.groupValue !== groupValue) return row;
           const overrideQty = Math.max(0, Number.isFinite(nextValue) ? Math.trunc(nextValue) : 0);
+          const hasParty = replenPartyKey.length > 0;
+          const clientMemoQty = hasParty
+            ? row.pullbackItems.filter((p) => normalizeReplenParty(p.PartyName) === replenPartyKey).length
+            : 0;
+          let remaining = overrideQty;
+          remaining -= Math.min(remaining, clientMemoQty);
+          const maxHold = Math.min(remaining, row.holdAvail ?? row.holdItems?.length ?? 0);
+          const holdPool = row.holdItems?.map((item) => item.StockNo) ?? [];
+          const prevHold = [...(row.selectedHoldStockNos ?? new Set<string>())].filter((sn) =>
+            holdPool.includes(sn),
+          );
+          const holdSelected = new Set(prevHold.slice(0, maxHold));
+          remaining -= holdSelected.size;
           const pool = row.inWarehouseItems.map((item) => item.StockNo);
-          const pillCount = Math.min(overrideQty, pool.length);
+          const pillCount = Math.min(remaining, pool.length);
           const warehousePillStockNos = pickRandom(pool, pillCount);
           const selectedWarehouseStockNos = new Set(warehousePillStockNos);
           return {
             ...row,
             overrideQty,
+            selectedHoldStockNos: holdSelected,
             warehousePillStockNos,
             selectedWarehouseStockNos,
             skippedPullback: false,
           };
+        }),
+      ),
+    );
+  }
+
+  function onToggleHoldPill(groupValue: string, stockNo: string) {
+    setRows((prev) =>
+      finalizeRows(
+        prev.map((row) => {
+          if (row.groupValue !== groupValue) return row;
+          const holdPool = row.holdItems?.map((item) => item.StockNo) ?? [];
+          if (!holdPool.includes(stockNo)) return row;
+          const next = new Set(row.selectedHoldStockNos ?? row.holdPillStockNos ?? []);
+          if (next.has(stockNo)) {
+            next.delete(stockNo);
+          } else {
+            const maxHold = maxHoldSelectable(row, replenPartyKey);
+            if (next.size >= maxHold) return row;
+            next.add(stockNo);
+          }
+          return { ...row, selectedHoldStockNos: next };
         }),
       ),
     );
@@ -2563,11 +3050,26 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
     return rows
       .filter((row) => {
         if (row.overrideQty <= 0) return false;
+        if (searchMode === "styleUpload") return true;
+        const base = computeAllocationBreakdown(row, replenPartyKey);
         const a = singleStatusAllocation(row, replenPartyKey);
-        return a.memoAlloc + a.stockAlloc + a.pullAlloc + a.factoryAllocDisplay > 0;
+        return a.memoAlloc + a.holdAlloc + a.stockAlloc + a.pullAlloc + a.factoryAllocDisplay > 0;
       })
       .map((row) => {
-        const alloc = singleStatusAllocation(row, replenPartyKey);
+        const base = computeAllocationBreakdown(row, replenPartyKey);
+        const isStyleUpload = searchMode === "styleUpload";
+        const single = singleStatusAllocation(row, replenPartyKey);
+        const alloc = isStyleUpload
+          ? {
+              ...single,
+              memoAlloc: base.memoAlloc,
+              holdAlloc: base.holdAlloc,
+              stockAlloc: Math.min(base.stockAlloc, row.selectedWarehouseStockNos.size),
+              pullAlloc: base.pullAlloc,
+              factoryAllocDisplay: base.factoryAllocDisplay,
+              pullbackAvail: base.pullbackAvail,
+            }
+          : single;
         const clientMemoStockNos = row.pullbackItems
           .filter((p) => normalizeReplenParty(p.PartyName) === replenPartyKey)
           .map((p) => p.StockNo);
@@ -2581,7 +3083,7 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
                 : null;
         return {
           groupValue: row.groupValue,
-          invoiceNos: row.invoiceNos,
+          invoiceNos: isStyleUpload ? ["STYLE-UPLOAD"] : row.invoiceNos,
           overrideQty: row.overrideQty,
           skippedPullback: alloc.status === "factory_order" && row.skippedPullback,
           allocation: {
@@ -2592,10 +3094,10 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
             pullbackAvail: alloc.pullbackAvail,
           },
           pullbackBadge,
-          clientMemoStockNos: alloc.status === "memo" ? clientMemoStockNos : [],
+          clientMemoStockNos: alloc.memoAlloc > 0 ? clientMemoStockNos : [],
           stockNos: [
-            ...(alloc.status === "stock"
-              ? [...row.selectedWarehouseStockNos].map((stockNo) => ({
+            ...(alloc.stockAlloc > 0
+              ? [...row.selectedWarehouseStockNos].slice(0, alloc.stockAlloc).map((stockNo) => ({
                   stockNo,
                   type: "warehouse" as const,
                 }))
@@ -2627,6 +3129,11 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
               loggedAt: log.loggedAt.toISOString(),
             })),
           })),
+          replenishmentType: isStyleUpload ? ("style_upload" as const) : ("invoice" as const),
+          styleUploadClientId: isStyleUpload ? styleUploadClientId : null,
+          styleUploadClientName: isStyleUpload ? styleUploadClient : null,
+          holdAlloc: base.holdAlloc,
+          holdPillStockNos: [...(row.selectedHoldStockNos ?? new Set<string>())],
         };
       });
   }
@@ -2753,6 +3260,19 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
         setToast({ type: "error", message: payload.message ?? "Confirm failed." });
         return;
       }
+      if (searchMode === "styleUpload") {
+        setRows([]);
+        setStyleUploadClient("");
+        setStyleUploadClientId(null);
+        setStyleUploadSummary(null);
+        setStyleUploadFile(null);
+        setHasSearched(false);
+        setRawPayload(null);
+        setConfirmed(false);
+        setConfirmWarningOpen(false);
+        setToast({ type: "success", message: "Replenishment saved. View in History tab." });
+        return;
+      }
       setConfirmed(true);
       setConfirmWarningOpen(false);
       setExportSnapshot(buildExportSnapshot());
@@ -2864,12 +3384,7 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
           <div className="inline-flex shrink-0 gap-0.5 rounded-full bg-secondary p-0.5">
             <button
               type="button"
-              onClick={() => {
-                setSearchMode("client");
-                setError(null);
-                setInvoiceSearchSummary(null);
-                setStyleUploadSummary(null);
-              }}
+              onClick={() => switchSearchMode("client")}
               className={cn(
                 "h-8 rounded-full px-4 text-[12px] font-semibold transition",
                 searchMode === "client"
@@ -2881,12 +3396,7 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
             </button>
             <button
               type="button"
-              onClick={() => {
-                setSearchMode("invoice");
-                setError(null);
-                setInvoiceSearchSummary(null);
-                setStyleUploadSummary(null);
-              }}
+              onClick={() => switchSearchMode("invoice")}
               className={cn(
                 "h-8 rounded-full px-4 text-[12px] font-semibold transition",
                 searchMode === "invoice"
@@ -2898,11 +3408,7 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
             </button>
             <button
               type="button"
-              onClick={() => {
-                setSearchMode("styleUpload");
-                setError(null);
-                setInvoiceSearchSummary(null);
-              }}
+              onClick={() => switchSearchMode("styleUpload")}
               className={cn(
                 "h-8 rounded-full px-4 text-[12px] font-semibold transition",
                 searchMode === "styleUpload"
@@ -3021,36 +3527,133 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
           </div>
         </div>
         ) : searchMode === "styleUpload" ? (
-          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
-            <div className="min-w-0 space-y-1.5">
-              <label className="text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">
-                Style Excel
-              </label>
-              <input
-                type="file"
-                accept=".xlsx,.csv"
-                onChange={(e) => setStyleUploadFile(e.target.files?.[0] ?? null)}
-                className="h-11 w-full rounded-full border border-border bg-card px-4 py-2 text-sm text-foreground outline-none transition file:mr-3 file:rounded-full file:border-0 file:bg-secondary file:px-3 file:py-1 file:text-xs file:font-semibold file:text-foreground focus:border-foreground/25 focus:ring-2 focus:ring-ring/20"
-              />
-              <p className="text-xs text-muted-foreground">
-                Required columns: <span className="font-semibold text-foreground">StyleNo</span> and{" "}
-                <span className="font-semibold text-foreground">MetalType</span>. Each row starts with Qty 1.
-              </p>
+          <div className="space-y-2">
+            <div className="grid gap-3 lg:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)_auto_auto]">
+              <div className="min-w-0 space-y-1.5">
+                <label className="text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">
+                  Client
+                </label>
+                <div className="relative" ref={styleClientSuggestRef}>
+                  <input
+                    type="text"
+                    value={styleUploadClient}
+                    onChange={(e) => void handleStyleClientSearch(e.target.value)}
+                    onFocus={() => {
+                      if (styleUploadClient.trim().length >= 3 && styleClientResults.length > 0) {
+                        setStyleClientSuggestionsOpen(true);
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (!styleClientSuggestionsOpen || styleClientResults.length === 0) return;
+                      if (e.key === "ArrowDown") {
+                        e.preventDefault();
+                        setStyleClientHighlightIndex((i) => Math.min(i + 1, styleClientResults.length - 1));
+                      } else if (e.key === "ArrowUp") {
+                        e.preventDefault();
+                        setStyleClientHighlightIndex((i) => Math.max(i - 1, 0));
+                      } else if (e.key === "Enter") {
+                        e.preventDefault();
+                        const c = styleClientResults[styleClientHighlightIndex];
+                        if (c) selectStyleClient(c);
+                      } else if (e.key === "Escape") {
+                        e.preventDefault();
+                        setStyleClientSuggestionsOpen(false);
+                      }
+                    }}
+                    placeholder="Search client name…"
+                    autoComplete="off"
+                    role="combobox"
+                    aria-expanded={styleClientSuggestionsOpen}
+                    aria-controls="style-client-suggest-listbox"
+                    aria-autocomplete="list"
+                    {...(styleClientSuggestionsOpen && styleClientResults.length > 0
+                      ? { "aria-activedescendant": `style-client-suggest-opt-${styleClientHighlightIndex}` }
+                      : {})}
+                    className="h-11 w-full rounded-full border border-border bg-card px-4 text-sm text-foreground outline-none transition placeholder:text-muted-foreground focus:border-foreground/25 focus:ring-2 focus:ring-ring/20"
+                  />
+                  {styleUploadClient.trim().length >= 3 && styleClientSuggestionsOpen ? (
+                    <div
+                      id="style-client-suggest-listbox"
+                      className="absolute top-full right-0 left-0 z-50 mt-1.5 max-h-[min(18rem,calc(100vh-8rem))] overflow-y-auto rounded-xl border border-border/90 bg-card p-2 shadow-[0_12px_40px_-12px_rgba(15,15,15,0.22)] ring-1 ring-stone-900/[0.06]"
+                      role="listbox"
+                      aria-label="Client matches"
+                    >
+                      <p className="mb-1 text-xs text-muted-foreground">
+                        {styleClientLoading
+                          ? "Searching clients..."
+                          : styleClientResults.length > 0
+                            ? "Use ↑ ↓ and Enter to choose a client"
+                            : "No matching client found"}
+                      </p>
+                      {styleClientResults.length > 0
+                        ? styleClientResults.map((client, index) => {
+                            const keyboardActive = index === styleClientHighlightIndex;
+                            const autoSelected = client.ClientID === styleUploadClientId;
+                            return (
+                              <button
+                                key={client.ClientID}
+                                type="button"
+                                role="option"
+                                aria-selected={autoSelected || keyboardActive}
+                                id={`style-client-suggest-opt-${index}`}
+                                onMouseEnter={() => setStyleClientHighlightIndex(index)}
+                                onClick={() => selectStyleClient(client)}
+                                className={[
+                                  "flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-sm transition",
+                                  keyboardActive
+                                    ? "bg-secondary font-medium text-foreground ring-2 ring-ring/30/80"
+                                    : autoSelected
+                                      ? "bg-secondary text-foreground"
+                                      : "text-foreground hover:bg-secondary",
+                                ].join(" ")}
+                              >
+                                <span>{client.PartyName}</span>
+                              </button>
+                            );
+                          })
+                        : null}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+              <div className="min-w-0 space-y-1.5">
+                <label className="text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">
+                  Style Excel
+                </label>
+                <input
+                  type="file"
+                  accept=".xlsx,.csv"
+                  onChange={(e) => setStyleUploadFile(e.target.files?.[0] ?? null)}
+                  className="h-11 w-full rounded-full border border-border bg-card px-4 py-2 text-sm text-foreground outline-none transition file:mr-3 file:rounded-full file:border-0 file:bg-secondary file:px-3 file:py-1 file:text-xs file:font-semibold file:text-foreground focus:border-foreground/25 focus:ring-2 focus:ring-ring/20"
+                />
+              </div>
+              <div className="flex items-end">
+                <button
+                  type="button"
+                  onClick={() => void downloadStyleTemplate()}
+                  className={cn(btnSecondary, "h-11 shrink-0 px-5")}
+                >
+                  <Download className="size-4" strokeWidth={2.2} />
+                  <span className="hidden sm:inline">Download Sample</span>
+                  <span className="sm:hidden">Sample</span>
+                </button>
+              </div>
+              <div className="flex items-end">
+                <button
+                  type="button"
+                  disabled={loading}
+                  onClick={handleSearch}
+                  className={cn(btnPrimary, "h-11 shrink-0 px-6")}
+                >
+                  <FileSpreadsheet className="size-4" strokeWidth={2.2} />
+                  Upload
+                </button>
+              </div>
             </div>
-            <div className="flex flex-col justify-start space-y-1.5">
-              <span className="text-[11px] font-semibold tracking-wide text-transparent uppercase" aria-hidden>
-                Upload
-              </span>
-              <button
-                type="button"
-                disabled={loading}
-                onClick={handleSearch}
-                className={cn(btnPrimary, "h-11 w-full min-w-[7.5rem] px-6")}
-              >
-                <FileSpreadsheet className="size-4" strokeWidth={2.2} />
-                Upload
-              </button>
-            </div>
+            <p className="text-xs text-muted-foreground">
+              Client optional (hold &amp; memo priority) · Excel requires{" "}
+              <span className="font-semibold text-foreground">StyleNo</span>
+            </p>
           </div>
         ) : (
           <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
@@ -3234,6 +3837,11 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
                     onFilterChange={setResultColumnFilter}
                     className={`${reTh} w-[11.5rem] min-w-[11.5rem] whitespace-nowrap`}
                   />
+                  {searchMode === "styleUpload" ? (
+                    <th className={`${reTh} w-[180px] min-w-[180px] whitespace-nowrap`}>
+                      Suggested Inventory
+                    </th>
+                  ) : null}
                   <ResultColumnMenuTh
                     label="Selected Stock"
                     sortKey="selectedStock"
@@ -3323,17 +3931,31 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
                         />
                       )}
                     </td>
+                    {searchMode === "styleUpload" ? (
+                      <td className={`${reTd} w-[180px] min-w-[180px] align-middle`}>
+                        <StyleUploadSuggestionCell row={row} replenPartyNorm={replenPartyKey} />
+                      </td>
+                    ) : null}
                     <td className={`${reTd} align-top`}>
                       <div className="space-y-1.5">
+                        {(row.holdItems?.length ?? 0) > 0 ? (
+                          <StockPillGroup
+                            allStockNos={(row.holdItems ?? []).map((item) => item.StockNo)}
+                            selectedStockNos={row.selectedHoldStockNos ?? new Set()}
+                            onToggle={(sn) => onToggleHoldPill(row.groupValue, sn)}
+                            variant="hold"
+                            labelPrefix="On Hold"
+                          />
+                        ) : null}
                         {showStockPills ? (
                           <StockPillGroup
                             allStockNos={row.warehousePillStockNos}
                             selectedStockNos={row.selectedWarehouseStockNos}
                             onToggle={(sn) => onTogglePill(row.groupValue, sn)}
                           />
-                        ) : (
+                        ) : (row.holdItems?.length ?? 0) === 0 ? (
                           <span className="text-muted-foreground">—</span>
-                        )}
+                        ) : null}
                       </div>
                     </td>
                     <td className={`${reTd} font-medium tabular-nums text-foreground`}>
@@ -3499,7 +4121,7 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
                 })}
                 {visibleRows.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="align-middle bg-card">
+                    <td colSpan={searchMode === "styleUpload" ? 10 : 9} className="align-middle bg-card">
                       <div className="flex min-h-[min(42vh,340px)] flex-col items-center justify-center gap-3 px-6 py-14 text-center">
                         {loading ? (
                           <>
@@ -3580,7 +4202,7 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
         </div>
       </div>
 
-      {rows.length > 0 && searchMode !== "styleUpload" ? (
+      {rows.length > 0 && (searchMode !== "styleUpload" || styleUploadClientId) ? (
         <div className="surface-card flex shrink-0 flex-wrap items-center justify-between gap-4 px-4 py-4 sm:px-5">
           <div className="min-w-0 flex-1 space-y-1">
             <p className="text-[15px] font-semibold tracking-tight text-foreground">

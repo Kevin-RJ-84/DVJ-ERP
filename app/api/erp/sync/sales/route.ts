@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth-server";
 import { requirePermission, ForbiddenError } from "@/lib/rbac";
-import { syncStockFromErp } from "@/lib/erp-sync";
+import { syncSalesFromErp } from "@/lib/erp-sync";
 
 export async function POST(request: NextRequest) {
   const auth = await requireAuth(request);
   if (!auth) return NextResponse.json({ message: "Unauthorized." }, { status: 401 });
 
   try {
-    await requirePermission(auth.userId, "upload.stock");
+    await requirePermission(auth.userId, "upload.sales");
   } catch (e) {
     if (e instanceof ForbiddenError) return e.response;
     throw e;
@@ -21,10 +21,10 @@ export async function POST(request: NextRequest) {
       process.env.ERP_REMOTE_ADDRESS ??
       "";
 
-    const result = await syncStockFromErp(requesterIp);
+    const result = await syncSalesFromErp(requesterIp);
     return NextResponse.json({ success: true, ...result });
   } catch (err) {
-    console.error("erp/sync/stock POST", err);
+    console.error("erp/sync/sales POST", err);
     return NextResponse.json(
       { success: false, error: String(err) },
       { status: 500 },

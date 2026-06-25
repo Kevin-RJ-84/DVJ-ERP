@@ -1,4 +1,4 @@
-const CONFIRMED_STATUSES = new Set(["stock", "memo", "pullback_confirmed"]);
+const CONFIRMED_STATUSES = new Set(["stock", "memo", "hold", "pullback_confirmed"]);
 const FACTORY_STATUSES = new Set(["factory_order", "factory_order_placed"]);
 const PENDING_STATUSES = new Set([
   "pullback",

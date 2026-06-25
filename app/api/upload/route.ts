@@ -7,6 +7,12 @@ import { requireAuth } from "@/lib/auth-server";
 import { requirePermission, ForbiddenError } from "@/lib/rbac";
 import { recalculateRankings } from "@/lib/rankings";
 import {
+  detachStaleActiveMemoLinks,
+  ensureActiveMemoStockLink,
+  upsertMemoHeaderByNo,
+  upsertMemoHeaderByStockNo,
+} from "@/lib/memo-sync";
+import {
   applyStockUploadMemoLifecyclePasses,
   isReturnedCandidateFromUpload,
 } from "@/lib/stock-lifecycle";
@@ -472,64 +478,36 @@ async function syncMemoLinksForStockRow(
   const client = row.Company ? await ensureClient({ partyName: row.Company }) : null;
 
   if (hasMemoFromMemoNo) {
+    const memoNo = row.MemoNo as string;
     const memoEndDate = computeMemoEndDate(row.MemoDate as Date, termsDays);
-    const memo = await db.memo.upsert({
-      where: { MemoNo: row.MemoNo as string },
-      update: {
-        MemoDate: row.MemoDate as Date,
-        Terms: termsDays,
-        MemoEndDate: memoEndDate,
-        ClientID: client?.ClientID ?? null,
-        MemoNarration: row.MemoNarration,
-      },
-      create: {
-        MemoNo: row.MemoNo as string,
-        MemoDate: row.MemoDate as Date,
-        Terms: termsDays,
-        MemoEndDate: memoEndDate,
-        ClientID: client?.ClientID ?? null,
-        MemoNarration: row.MemoNarration,
-      },
-    });
+    const memoPayload = {
+      MemoDate: row.MemoDate as Date,
+      Terms: termsDays,
+      MemoEndDate: memoEndDate,
+      ClientID: client?.ClientID ?? null,
+      MemoNarration: row.MemoNarration,
+      IsActive: true,
+    };
 
-    await db.memo_stock.create({
-      data: {
-        MemoID: memo.MemoID,
-        StockNo: stockNo,
-      },
-    });
+    await detachStaleActiveMemoLinks(stockNo, memoNo);
+    const memo = await upsertMemoHeaderByNo(memoNo, memoPayload, null);
+    await ensureActiveMemoStockLink(memo.MemoID, stockNo);
     return true;
   }
 
   const memoEndDate = computeMemoEndDate(row.MemoDate as Date, termsDays);
   const syntheticNo = syntheticMemoNoForStock(stockNo);
-  const memo = await db.memo.upsert({
-    where: { StockNo: stockNo },
-    create: {
-      MemoNo: syntheticNo,
-      StockNo: stockNo,
-      MemoDate: row.MemoDate as Date,
-      Terms: termsDays,
-      MemoEndDate: memoEndDate,
-      ClientID: client?.ClientID ?? null,
-      MemoNarration: row.MemoNarration,
-    },
-    update: {
-      MemoNo: syntheticNo,
-      MemoDate: row.MemoDate as Date,
-      Terms: termsDays,
-      MemoEndDate: memoEndDate,
-      ClientID: client?.ClientID ?? null,
-      MemoNarration: row.MemoNarration,
-    },
-  });
+  const memoPayload = {
+    MemoDate: row.MemoDate as Date,
+    Terms: termsDays,
+    MemoEndDate: memoEndDate,
+    ClientID: client?.ClientID ?? null,
+    MemoNarration: row.MemoNarration,
+    IsActive: true,
+  };
+  const memo = await upsertMemoHeaderByStockNo(stockNo, syntheticNo, memoPayload);
 
-  await db.memo_stock.create({
-    data: {
-      MemoID: memo.MemoID,
-      StockNo: stockNo,
-    },
-  });
+  await ensureActiveMemoStockLink(memo.MemoID, stockNo);
   return true;
 }
 

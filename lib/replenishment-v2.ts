@@ -15,6 +15,8 @@ export type ReplenishmentV2RawSoldItem = {
   groupValues: Record<ReplenishmentGroupField, string | null>;
   /** Client's StyleRank for this StyleNo (when available). */
   styleRank?: number | null;
+  /** Style upload rows: quantity from Excel (defaults to 1 per row when omitted). */
+  uploadQty?: number;
 };
 
 export type ReplenishmentV2RawWarehouseItem = {
@@ -23,6 +25,34 @@ export type ReplenishmentV2RawWarehouseItem = {
   location: string | null;
   boxCode: string | null;
   groupValues: Record<ReplenishmentGroupField, string | null>;
+};
+
+export type ReplenishmentV2RawHoldItem = {
+  stockNo: string;
+  styleNo: string | null;
+  metalType: string | null;
+  holdCompany: string | null;
+  productDescription?: string | null;
+  location?: string | null;
+  boxCode?: string | null;
+  groupValues: Record<ReplenishmentGroupField, string | null>;
+};
+
+export type StyleUploadSuggestion = {
+  stockNo: string;
+  metalType: string;
+  source: "memo" | "hold" | "stock" | "pullback";
+};
+
+export type StyleUploadGroupMeta = {
+  groupKey: string;
+  styleNo: string;
+  metalType: string | null;
+  soldQty: number;
+  memoAlloc: number;
+  holdAlloc: number;
+  holdPillStockNos: string[];
+  suggestion?: StyleUploadSuggestion | null;
 };
 
 export type ReplenishmentV2RawPullbackItem = {
@@ -37,11 +67,18 @@ export type ReplenishmentV2RawPullbackItem = {
   groupValues: Record<ReplenishmentGroupField, string | null>;
 };
 
+export type ReplenishmentV2RawClientMemoItem = {
+  stockNo: string;
+  groupValues: Record<ReplenishmentGroupField, string | null>;
+};
+
 export type ReplenishmentV2ApiPayload = {
   rows: Array<{
     groupValue: string;
     styleRank: number | null;
     soldQty: number;
+    memoAlloc?: number;
+    holdAlloc?: number;
     inWarehouse: number;
     pullbackAvailable: number;
     factoryOrder: number;
@@ -67,6 +104,9 @@ export type ReplenishmentV2ApiPayload = {
     soldItems: ReplenishmentV2RawSoldItem[];
     inWarehouseItems: ReplenishmentV2RawWarehouseItem[];
     pullbackItems: ReplenishmentV2RawPullbackItem[];
+    holdItems?: ReplenishmentV2RawHoldItem[];
+    clientMemoItems?: ReplenishmentV2RawClientMemoItem[];
+    styleUploadGroups?: StyleUploadGroupMeta[];
     completedItems?: Array<{
       invoiceNo: string;
       groupField: ReplenishmentGroupField | string;

@@ -251,6 +251,7 @@ export interface ErpStockRecord {
   PROD_TYPE: string | null
   PROD_STYLE_CODE: string | null
   PROD_STYLE: string | null
+  PROD_DESC: string | null
   STONE_TYPES: string | null
   STONE_WT: number | null
   QUANTITY: number | null
@@ -261,16 +262,16 @@ export interface ErpStockRecord {
   PROD_VAL: number | null
   MEMO_REMARK: string | null
   MEMO_DATE: string | null
+  MEMO_CODE: string | null
+  MEMO_TERM: number | null
   HOLD_REMARK: string | null
   HOLD_DATE: string | null
+  HOLD_CODE: string | null
   HOLD_SOLD_REMARK: string | null
   HOLD_SOLD_DATE: string | null
   ROWID: number
-  // Future fields (when API team adds them)
   MEMO_PARTY_CODE?: string | null
   MEMO_PARTY_NAME?: string | null
-  MEMO_TERMS_DAYS?: number | null
-  PROD_DESC?: string | null
   BOX_CODE?: string | null
 }
 
@@ -480,8 +481,8 @@ async function syncMemoFromErpRecord(
 ): Promise<void> {
   const memoDate = new Date(record.MEMO_DATE!)
   
-  // Get terms — use dedicated field when available, else default
-  const terms = record.MEMO_TERMS_DAYS ?? 30
+  const terms = record.MEMO_TERM && record.MEMO_TERM > 0 ? record.MEMO_TERM : 0
+  if (terms === 0) return
   const memoEndDate = new Date(memoDate)
   memoEndDate.setDate(memoEndDate.getDate() + terms)
 
