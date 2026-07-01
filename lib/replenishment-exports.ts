@@ -48,6 +48,14 @@ export type ReplenishmentExportSourceItem = {
   replenishedAt?: string;
 };
 
+export type ProductExportColumns = {
+  stoneShape: string;
+  metal: string;
+  metalType: string;
+  productType: string;
+  productStyle: string;
+};
+
 export type CurrentReplenishmentExportRow = {
   invoiceNo: string;
   clientName: string;
@@ -55,8 +63,7 @@ export type CurrentReplenishmentExportRow = {
   quantity: number;
   status: string;
   stockNo?: string | null;
-  productSummary?: string | null;
-};
+} & ProductExportColumns;
 
 function safeFileSegment(s: string): string {
   const t = s.replace(/[/\\?*[\]:]/g, "_").replace(/\s+/g, " ").trim();
@@ -101,7 +108,19 @@ export async function exportCurrentReplenishmentExcel(
 ) {
   const wb = new ExcelJS.Workbook();
   const sheet = wb.addWorksheet("Current Results");
-  sheet.addRow(["InvoiceNo", "ClientName", "Group", "Quantity", "Status", "StockNo", "ProductSummary"]);
+  sheet.addRow([
+    "InvoiceNo",
+    "ClientName",
+    "Group",
+    "Quantity",
+    "Status",
+    "StockNo",
+    "Shape",
+    "Metal",
+    "Metal Type",
+    "Product Type",
+    "Product Style",
+  ]);
 
   for (const r of rows) {
     sheet.addRow([
@@ -111,7 +130,11 @@ export async function exportCurrentReplenishmentExcel(
       r.quantity,
       currentStatusLabel(r.status),
       r.stockNo && r.stockNo !== "—" ? r.stockNo : "",
-      r.productSummary ?? "",
+      r.stoneShape,
+      r.metal,
+      r.metalType,
+      r.productType,
+      r.productStyle,
     ]);
   }
 

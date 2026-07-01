@@ -2,7 +2,11 @@ import ExcelJS from "exceljs";
 
 export type ClientReplenishmentExcelRow = {
   groupValue: string;
-  productSummary: string;
+  stoneShape: string;
+  metal: string;
+  metalType: string;
+  productType: string;
+  productStyle: string;
   soldQty: number;
   overrideQty: number;
   inWarehouse: number;
@@ -33,7 +37,11 @@ export async function exportClientReplenishmentExcel(params: {
   const data = wb.addWorksheet("Results");
   data.addRow([
     "Group value",
-    "Product (from sales)",
+    "Shape",
+    "Metal",
+    "Metal Type",
+    "Product Type",
+    "Product Style",
     "Sold qty",
     "Override qty",
     "In warehouse",
@@ -44,7 +52,11 @@ export async function exportClientReplenishmentExcel(params: {
   for (const r of params.rows) {
     data.addRow([
       r.groupValue,
-      r.productSummary,
+      r.stoneShape,
+      r.metal,
+      r.metalType,
+      r.productType,
+      r.productStyle,
       r.soldQty,
       r.overrideQty,
       r.inWarehouse,

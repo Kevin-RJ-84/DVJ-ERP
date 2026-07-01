@@ -7,6 +7,8 @@
 import { getConfig, getConfigBool, getConfigInt } from "@/lib/config";
 import { syncSalesFromErp, syncStockFromErp } from "@/lib/erp-sync";
 
+let isSyncRunning = false;
+
 function minutesSince(iso: string): number {
   const lastSync = new Date(iso);
   return (Date.now() - lastSync.getTime()) / 1000 / 60;
@@ -25,6 +27,10 @@ export async function triggerAutoSyncIfDue(): Promise<void> {
   );
   if (!erpConfigured) return;
 
+  if (isSyncRunning) {
+    return;
+  }
+
   try {
     const syncEnabled = await getConfigBool("erp_sync_enabled");
     if (!syncEnabled) return;
@@ -37,17 +43,29 @@ export async function triggerAutoSyncIfDue(): Promise<void> {
     const salesDue = isSyncDue(lastSalesSyncStr, intervalMinutes);
     if (!stockDue && !salesDue) return;
 
+    isSyncRunning = true;
+
+    const tasks: Promise<unknown>[] = [];
+
     if (stockDue) {
-      syncStockFromErp().catch((err) => {
-        console.error("Auto ERP stock sync failed:", err);
-      });
+      tasks.push(
+        syncStockFromErp().catch((err) => {
+          console.error("Auto ERP stock sync failed:", err);
+        }),
+      );
     }
 
     if (salesDue) {
-      syncSalesFromErp().catch((err) => {
-        console.error("Auto ERP sales sync failed:", err);
-      });
+      tasks.push(
+        syncSalesFromErp().catch((err) => {
+          console.error("Auto ERP sales sync failed:", err);
+        }),
+      );
     }
+
+    Promise.all(tasks).finally(() => {
+      isSyncRunning = false;
+    });
   } catch (err) {
     console.error("Auto sync check failed:", err);
   }

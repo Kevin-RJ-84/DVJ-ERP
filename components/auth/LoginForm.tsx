@@ -3,6 +3,8 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Eye, EyeOff } from "lucide-react";
+import { alertError, fieldInput, fieldLabel } from "@/lib/ui-styles";
+import { cn } from "@/lib/utils";
 
 type LoginState = {
   email: string;
@@ -11,7 +13,7 @@ type LoginState = {
 
 type LoginFormProps = {
   /** `glass`: pill fields + compact actions for frosted login panel */
-  variant?: "default" | "glass" | "erpGlass";
+  variant?: "default" | "glass" | "erpGlass" | "dashboard";
 };
 
 export function LoginForm({ variant = "default" }: LoginFormProps) {
@@ -117,6 +119,68 @@ export function LoginForm({ variant = "default" }: LoginFormProps) {
             {isSubmitting ? "…" : "Login"}
           </button>
         </div>
+      </form>
+    );
+  }
+
+  if (variant === "dashboard") {
+    return (
+      <form onSubmit={handleSubmit} className="flex flex-col gap-5">
+        <div>
+          <label htmlFor="email" className={fieldLabel}>
+            Work email
+          </label>
+          <input
+            id="email"
+            type="email"
+            required
+            autoComplete="email"
+            value={form.email}
+            onChange={(event) =>
+              setForm((prev) => ({ ...prev, email: event.target.value }))
+            }
+            className={cn(fieldInput, "clay-inset mt-2 h-11 rounded-full border-transparent bg-background px-4")}
+            placeholder="you@dvjewelrycorp.com"
+          />
+        </div>
+
+        <div>
+          <label htmlFor="password" className={fieldLabel}>
+            Password
+          </label>
+          <div className="relative mt-2">
+            <input
+              id="password"
+              type={showPassword ? "text" : "password"}
+              required
+              autoComplete="current-password"
+              value={form.password}
+              onChange={(event) =>
+                setForm((prev) => ({ ...prev, password: event.target.value }))
+              }
+              className={cn(fieldInput, "clay-inset h-11 rounded-full border-transparent bg-background pl-4 pr-11")}
+              placeholder="Enter your password"
+            />
+            <button
+              type="button"
+              onClick={() => setShowPassword((prev) => !prev)}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
+              aria-label={showPassword ? "Hide password" : "Show password"}
+            >
+              {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+          </div>
+        </div>
+
+        {error ? <p className={alertError}>{error}</p> : null}
+
+        <button
+          type="submit"
+          disabled={isSubmitting}
+          className="clay-cta mt-1 flex h-11 w-full cursor-pointer items-center justify-center rounded-full text-sm font-semibold transition hover:opacity-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {isSubmitting ? "Signing in..." : "Sign in"}
+        </button>
       </form>
     );
   }

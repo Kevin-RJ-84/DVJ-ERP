@@ -41,6 +41,7 @@ import {
   exportFactoryOrdersExcel,
   toFactoryExportRows,
   type CurrentReplenishmentExportRow,
+  type ProductExportColumns,
   type ReplenishmentExportSourceItem,
 } from "@/lib/replenishment-exports";
 import type { DashboardSession } from "@/components/layout/dashboard-session";
@@ -99,6 +100,8 @@ type TableRow = Omit<ReplenishmentV2ApiPayload["rows"][number], "inWarehouseItem
   overrideQty: number;
   /** Distinct stock traits across sold lines in this group (Style, shape, metal, …). */
   productSummary: string;
+  /** Separate product attributes for Excel export. */
+  productExport: ProductExportColumns;
   inWarehouseItems: WarehouseTableItem[];
   pullbackItems: PullbackTableItem[];
   /** Warehouse StockNo pills shown for this row — capped at override qty (random sample). */
@@ -747,6 +750,52 @@ function formatDistinctSet(label: string, values: Set<string>, maxShow = 3): str
   return `${label}: ${sorted.slice(0, maxShow).join(", ")} (+${sorted.length - maxShow})`;
 }
 
+type ProductFieldSets = {
+  style: Set<string>;
+  stoneShape: Set<string>;
+  metal: Set<string>;
+  metalType: Set<string>;
+  productType: Set<string>;
+  productStyle: Set<string>;
+};
+
+function collectProductFieldSets(soldInGroup: ReplenishmentV2RawSoldItem[]): ProductFieldSets {
+  const style = new Set<string>();
+  const stoneShape = new Set<string>();
+  const metal = new Set<string>();
+  const metalType = new Set<string>();
+  const productType = new Set<string>();
+  const productStyle = new Set<string>();
+
+  for (const s of soldInGroup) {
+    const gv = s.groupValues;
+    addDistinct(style, gv.StyleNo);
+    addDistinct(stoneShape, gv.StoneShape);
+    addDistinct(metal, gv.Metal);
+    addDistinct(metalType, gv.MetalType);
+    addDistinct(productType, gv.ProductType);
+    addDistinct(productStyle, gv.ProductStyle);
+  }
+
+  return { style, stoneShape, metal, metalType, productType, productStyle };
+}
+
+function formatExportColumn(values: Set<string>): string {
+  if (values.size === 0) return "";
+  return [...values].sort((a, b) => a.localeCompare(b)).join(", ");
+}
+
+function buildProductExportFields(soldInGroup: ReplenishmentV2RawSoldItem[]): ProductExportColumns {
+  const sets = collectProductFieldSets(soldInGroup);
+  return {
+    stoneShape: formatExportColumn(sets.stoneShape),
+    metal: formatExportColumn(sets.metal),
+    metalType: formatExportColumn(sets.metalType),
+    productType: formatExportColumn(sets.productType),
+    productStyle: formatExportColumn(sets.productStyle),
+  };
+}
+
 /**
  * Summarizes StyleNo, StoneShape, Metal, etc. from sold lines in this group.
  * Skips repeating the group-by dimension when it matches the row's group value.
@@ -756,22 +805,8 @@ function buildProductSummary(
   groupBy: ReplenishmentGroupField,
   groupValue: string,
 ): string {
-  const style = new Set<string>();
-  const shape = new Set<string>();
-  const metal = new Set<string>();
-  const metalType = new Set<string>();
-  const productType = new Set<string>();
-  const productStyle = new Set<string>();
-
-  for (const s of soldInGroup) {
-    const gv = s.groupValues;
-    addDistinct(style, gv.StyleNo);
-    addDistinct(shape, gv.StoneShape);
-    addDistinct(metal, gv.Metal);
-    addDistinct(metalType, gv.MetalType);
-    addDistinct(productType, gv.ProductType);
-    addDistinct(productStyle, gv.ProductStyle);
-  }
+  const { style, stoneShape, metal, metalType, productType, productStyle } =
+    collectProductFieldSets(soldInGroup);
 
   const parts: string[] = [];
   const pushIf = (field: ReplenishmentGroupField, label: string, set: Set<string>) => {
@@ -784,7 +819,7 @@ function buildProductSummary(
   };
 
   pushIf("StyleNo", "Style", style);
-  pushIf("StoneShape", "Shape", shape);
+  pushIf("StoneShape", "Shape", stoneShape);
   pushIf("Metal", "Metal", metal);
   pushIf("MetalType", "Metal type", metalType);
   pushIf("ProductType", "Product type", productType);
@@ -1745,6 +1780,7 @@ function regroup(
         (item) => normalizeGroupValue(item.groupValues[groupBy]) === groupValue,
       );
       const productSummary = buildProductSummary(soldInGroup, groupBy, groupValue);
+      const productExport = buildProductExportFields(soldInGroup);
       const soldMetalTypes = new Set(
         soldInGroup
           .map((item) => normalizeMetalType(item.groupValues.MetalType))
@@ -1857,6 +1893,7 @@ function regroup(
         holdAlloc,
         memoAlloc,
         productSummary,
+        productExport,
         warehousePillStockNos,
         selectedWarehouseStockNos,
         invoiceNos: [...(invoiceNosByGroup.get(groupValue) ?? [])],
@@ -1988,6 +2025,7 @@ function regroupStyleUpload(payload: ReplenishmentV2ApiPayload, replenPartyNorm 
       const warehousePickCount = Math.min(remaining, warehousePool.length);
       const warehousePillStockNos = pickRandom(warehousePool, warehousePickCount);
       const metalLabel = metalType?.trim() ? metalType : "any metal";
+      const productExport = buildProductExportFields(soldInGroup);
 
       return {
         groupValue,
@@ -2007,6 +2045,7 @@ function regroupStyleUpload(payload: ReplenishmentV2ApiPayload, replenPartyNorm 
         memoAlloc,
         suggestion: groupMeta?.suggestion ?? null,
         productSummary: `Style: ${styleNo ?? "—"} · Metal type: ${metalLabel}`,
+        productExport,
         warehousePillStockNos,
         selectedWarehouseStockNos: new Set(warehousePillStockNos),
         invoiceNos: ["STYLE-UPLOAD"],
@@ -3224,7 +3263,7 @@ export function ReplenishmentV2Page({ session: sessionProp = null }: { session?:
         quantity: row.overrideQty,
         status,
         stockNo: status === "stock" ? [...row.selectedWarehouseStockNos].join(", ") : "",
-        productSummary: row.productSummary,
+        ...row.productExport,
       };
     });
   }

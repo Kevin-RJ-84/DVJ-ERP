@@ -33,7 +33,10 @@ export interface ErpStockRecord {
   PROD_VAL: number | null;
   MEMO_REMARK: string | null;
   MEMO_DATE: string | null;
+  /** PartyCode of the client who has the memo */
   MEMO_CODE: string | null;
+  /** Actual memo invoice number (MemoNo); null when item is not on memo */
+  MEMO_INV_NO: string | null;
   MEMO_TERM: number | null;
   HOLD_REMARK: string | null;
   MEMO_PRICE: number | null;

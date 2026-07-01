@@ -63,7 +63,8 @@ type PreloadedActiveLink = {
 };
 
 type PlannedMemoPayload = MemoHeaderPayload & {
-  clientKey: string | null;
+  resolvedClientId: string | null;
+  clientPendingKey: string | null;
   stockNoForCreate: string | null;
   stockNoBackfill: string | null;
 };
@@ -87,6 +88,7 @@ type MappedStockRow = {
   MetalWT: Prisma.Decimal | null;
   StockValue: Prisma.Decimal | null;
   MemoPrice: Prisma.Decimal | null;
+  MemoInvNo: string | null;
   HoldDate: Date | null;
   HoldNarration: string | null;
   HoldCompany: string | null;
@@ -150,6 +152,7 @@ function mapErpRecordToStockRow(record: ErpStockRecord): MappedStockRow {
     MetalWT: toDecimal(record.METAL_WT),
     StockValue: toDecimal(record.PROD_VAL),
     MemoPrice: toDecimal(record.MEMO_PRICE),
+    MemoInvNo: record.MEMO_INV_NO?.trim() || null,
     HoldDate: record.HOLD_DATE ? new Date(record.HOLD_DATE) : null,
     HoldNarration: null,
     HoldCompany: record.HOLD_REMARK?.trim() ?? null,
@@ -167,7 +170,7 @@ async function bulkUpsertStockChunk(chunk: MappedStockRow[]): Promise<void> {
       "StyleNo", "ProductStyle", "ProductDescription",
       "StoneType", "StoneShape", "StoneWT", "Quantity",
       "StonePCs", "MetalType", "Metal", "MetalPurity",
-      "MetalWT", "StockValue", "MemoPrice",
+      "MetalWT", "StockValue", "MemoPrice", "MemoInvNo",
       "HoldDate", "HoldNarration", "HoldCompany",
       "HoldSoldDate", "HoldSoldRemark",
       "LastSyncedAt", "SyncSource"
@@ -181,7 +184,7 @@ async function bulkUpsertStockChunk(chunk: MappedStockRow[]): Promise<void> {
           ${row.StoneShape}, ${row.StoneWT}, ${row.Quantity},
           ${row.StonePCs}, ${row.MetalType}, ${row.Metal},
           ${row.MetalPurity}, ${row.MetalWT}, ${row.StockValue},
-          ${row.MemoPrice}, ${row.HoldDate}, ${row.HoldNarration},
+          ${row.MemoPrice}, ${row.MemoInvNo}, ${row.HoldDate}, ${row.HoldNarration},
           ${row.HoldCompany}, ${row.HoldSoldDate}, ${row.HoldSoldRemark},
           ${new Date()}, ${"api"}
         )`,
@@ -205,6 +208,7 @@ async function bulkUpsertStockChunk(chunk: MappedStockRow[]): Promise<void> {
       "MetalWT" = EXCLUDED."MetalWT",
       "StockValue" = EXCLUDED."StockValue",
       "MemoPrice" = EXCLUDED."MemoPrice",
+      "MemoInvNo" = EXCLUDED."MemoInvNo",
       "HoldDate" = EXCLUDED."HoldDate",
       "HoldNarration" = EXCLUDED."HoldNarration",
       "HoldCompany" = EXCLUDED."HoldCompany",
@@ -271,6 +275,7 @@ async function applyBulkMemoLifecycle(
               soldChunk.map(
                 (sn) => Prisma.sql`WHEN ${sn} THEN ${soldMap.get(sn) ?? null}`,
               ),
+              " ",
             )}
             ELSE "InvoiceNo"
           END,
@@ -350,10 +355,8 @@ async function applyBulkMemoLifecycle(
   return { markedSold, markedReturned, flaggedMissing, memosDeactivated };
 }
 
-function erpMemoNo(record: ErpStockRecord, stockNo: string, memoDate: Date): string {
-  const fromErp = record.MEMO_CODE?.trim();
-  if (fromErp) return fromErp;
-  return `ERP-${stockNo}-${memoDate.toISOString().split("T")[0]}`;
+function erpMemoNo(record: ErpStockRecord): string | null {
+  return record.MEMO_INV_NO?.trim() || null;
 }
 
 function memoNoKey(memoNo: string): string {
@@ -364,12 +367,63 @@ function erpPartyName(record: ErpStockRecord): string | null {
   return record.MEMO_PARTY_NAME?.trim() ?? record.MEMO_REMARK?.trim() ?? null;
 }
 
+function resolveClientForErpMemo(
+  record: ErpStockRecord,
+  clientCodeToId: Map<string, string>,
+  clientNameToId: Map<string, string>,
+  clientsPendingCreate: Map<string, { PartyName: string; PartyCode: string | null }>,
+): { resolvedClientId: string | null; clientPendingKey: string | null } {
+  const partyCode = record.MEMO_CODE?.trim() ?? null;
+  const remarkName = record.MEMO_REMARK?.trim() ?? null;
+  const partyName = erpPartyName(record);
+
+  if (partyCode) {
+    const byCode = clientCodeToId.get(partyCode);
+    if (byCode) {
+      return { resolvedClientId: byCode, clientPendingKey: null };
+    }
+  }
+
+  if (remarkName) {
+    const remarkKey = remarkName.toLowerCase();
+    const byRemark = clientNameToId.get(remarkKey);
+    if (byRemark) {
+      return { resolvedClientId: byRemark, clientPendingKey: null };
+    }
+  }
+
+  if (partyName && partyName !== remarkName) {
+    const nameKey = partyName.toLowerCase();
+    const byName = clientNameToId.get(nameKey);
+    if (byName) {
+      return { resolvedClientId: byName, clientPendingKey: null };
+    }
+  }
+
+  const createName = partyName ?? remarkName ?? partyCode;
+  if (!createName && !partyCode) {
+    return { resolvedClientId: null, clientPendingKey: null };
+  }
+
+  const pendingKey = partyCode ? `code:${partyCode}` : `name:${createName!.toLowerCase()}`;
+  if (!clientsPendingCreate.has(pendingKey)) {
+    clientsPendingCreate.set(pendingKey, {
+      PartyName: createName ?? partyCode!,
+      PartyCode: partyCode,
+    });
+  }
+
+  return { resolvedClientId: null, clientPendingKey: pendingKey };
+}
+
 async function bulkSyncMemosFromErpRecords(
   erpRecords: ErpStockRecord[],
   errors: string[],
 ): Promise<void> {
   const memoSyncStart = Date.now();
-  const memoItems = erpRecords.filter((r) => r.MEMO_DATE && erpMemoTerms(r) > 0);
+  const memoItems = erpRecords.filter(
+    (r) => r.MEMO_DATE && r.MEMO_INV_NO?.trim() && erpMemoTerms(r) > 0,
+  );
   const memoTotal = memoItems.length;
   console.log(`[ERP SYNC] ${memoTotal} items have memo data`);
 
@@ -392,14 +446,12 @@ async function bulkSyncMemosFromErpRecords(
 
   const memoByNo = new Map<string, MemoRef>();
   const memoByStockNo = new Map<string, MemoRef>();
-  const stockNoClaimed = new Set<string>();
   for (const memo of existingMemos) {
     const key = memoNoKey(memo.MemoNo);
     if (!memoByNo.has(key)) {
       memoByNo.set(key, memo);
     }
     if (memo.StockNo) {
-      stockNoClaimed.add(memo.StockNo);
       if (!memoByStockNo.has(memo.StockNo)) {
         memoByStockNo.set(memo.StockNo, memo);
       }
@@ -432,6 +484,12 @@ async function bulkSyncMemosFromErpRecords(
   const clientNameToId = new Map(
     existingClients.map((c) => [c.PartyName.toLowerCase().trim(), c.ClientID]),
   );
+  const clientCodeToId = new Map<string, string>();
+  for (const client of existingClients) {
+    const code = client.PartyCode?.trim();
+    if (code) clientCodeToId.set(code, client.ClientID);
+  }
+  const clientPendingKeyToId = new Map<string, string>();
 
   console.log(
     `[MEMO SYNC] Phase 1 preload done in ${Date.now() - phase1Start}ms — ${existingMemos.length} memos, ${existingActiveLinks.length} active links, ${existingClients.length} clients`,
@@ -475,27 +533,18 @@ async function bulkSyncMemosFromErpRecords(
     }
   };
 
-  const resolveClientKey = (record: ErpStockRecord): string | null => {
-    const partyName = erpPartyName(record);
-    if (!partyName) return null;
-    const key = partyName.toLowerCase().trim();
-    if (!clientNameToId.has(key) && !clientsPendingCreate.has(key)) {
-      clientsPendingCreate.set(key, {
-        PartyName: partyName,
-        PartyCode: record.MEMO_PARTY_CODE?.trim() ?? null,
-      });
-    }
-    return key;
-  };
+  const resolveClientKey = (record: ErpStockRecord) =>
+    resolveClientForErpMemo(record, clientCodeToId, clientNameToId, clientsPendingCreate);
 
   let processed = 0;
   for (const record of memoItems) {
     const stockNo = record.PROD_CODE.trim();
     const memoDate = new Date(record.MEMO_DATE!);
     const terms = erpMemoTerms(record);
-    const memoNo = erpMemoNo(record, stockNo, memoDate);
+    const memoNo = erpMemoNo(record);
+    if (!memoNo) continue;
     const noKey = memoNoKey(memoNo);
-    const sharedMemo = Boolean(record.MEMO_CODE?.trim());
+    const clientResolution = resolveClientKey(record);
     const memoEndDate = new Date(memoDate);
     memoEndDate.setDate(memoEndDate.getDate() + terms);
 
@@ -505,9 +554,10 @@ async function bulkSyncMemosFromErpRecords(
       MemoEndDate: memoEndDate,
       MemoNarration: record.MEMO_REMARK?.trim() ?? null,
       ClientID: null,
-      clientKey: resolveClientKey(record),
+      resolvedClientId: clientResolution.resolvedClientId,
+      clientPendingKey: clientResolution.clientPendingKey,
       IsActive: true,
-      stockNoForCreate: sharedMemo ? null : stockNo,
+      stockNoForCreate: null,
       stockNoBackfill: null,
     };
 
@@ -541,37 +591,20 @@ async function bulkSyncMemosFromErpRecords(
 
     const existingMemo = memoByNo.get(noKey);
     if (existingMemo) {
-      if (!sharedMemo && !existingMemo.StockNo && !stockNoClaimed.has(stockNo)) {
-        payload.stockNoBackfill = stockNo;
-        stockNoClaimed.add(stockNo);
-      }
       memosToUpdateById.set(existingMemo.MemoID, {
         MemoID: existingMemo.MemoID,
         payload,
       });
     } else if (!memosToCreateByNo.has(noKey)) {
-      let createStockNo: string | null = sharedMemo ? null : stockNo;
-      if (createStockNo && stockNoClaimed.has(stockNo)) {
-        createStockNo = null;
-      } else if (createStockNo) {
-        stockNoClaimed.add(stockNo);
-      }
       memosToCreateByNo.set(noKey, {
         MemoNo: memoNo,
         payload,
-        stockNo: createStockNo,
+        stockNo: null,
       });
     } else {
       const queued = memosToCreateByNo.get(noKey)!;
       queued.payload = payload;
-      if (!sharedMemo) {
-        if (!queued.stockNo && !stockNoClaimed.has(stockNo)) {
-          queued.stockNo = stockNo;
-          stockNoClaimed.add(stockNo);
-        }
-      } else {
-        queued.stockNo = null;
-      }
+      queued.stockNo = null;
     }
 
     const stillActiveForTarget = (activeLinksByStock.get(stockNo) ?? []).some(
@@ -610,9 +643,11 @@ async function bulkSyncMemosFromErpRecords(
   };
 
   const resolvePayloadClientId = (payload: PlannedMemoPayload): MemoHeaderPayload => {
-    const clientId = payload.clientKey
-      ? (clientNameToId.get(payload.clientKey) ?? null)
-      : null;
+    const clientId =
+      payload.resolvedClientId ??
+      (payload.clientPendingKey
+        ? (clientPendingKeyToId.get(payload.clientPendingKey) ?? null)
+        : null);
     return {
       MemoDate: payload.MemoDate,
       Terms: payload.Terms,
@@ -627,15 +662,26 @@ async function bulkSyncMemosFromErpRecords(
     if (clientsPendingCreate.size === 0) return;
     const clientRows = [...clientsPendingCreate.values()];
     await db.clients.createMany({ data: clientRows, skipDuplicates: true });
-    for (const row of clientRows) {
-      const key = row.PartyName.toLowerCase().trim();
-      if (clientNameToId.has(key)) continue;
-      const found = await db.clients.findFirst({
-        where: { PartyName: { equals: row.PartyName, mode: "insensitive" } },
-        select: { ClientID: true },
-      });
+    for (const [pendingKey, row] of clientsPendingCreate.entries()) {
+      let found: { ClientID: string } | null = null;
+      if (row.PartyCode) {
+        found = await db.clients.findUnique({
+          where: { PartyCode: row.PartyCode },
+          select: { ClientID: true },
+        });
+        if (found) {
+          clientCodeToId.set(row.PartyCode, found.ClientID);
+        }
+      }
+      if (!found) {
+        found = await db.clients.findFirst({
+          where: { PartyName: { equals: row.PartyName, mode: "insensitive" } },
+          select: { ClientID: true },
+        });
+      }
       if (found) {
-        clientNameToId.set(key, found.ClientID);
+        clientNameToId.set(row.PartyName.toLowerCase().trim(), found.ClientID);
+        clientPendingKeyToId.set(pendingKey, found.ClientID);
       }
     }
     console.log(
@@ -826,7 +872,13 @@ export async function syncStockFromErp(remoteAddress?: string): Promise<StockSyn
     const fetchStart = Date.now();
     const erpRecords = await fetchErpStock(remoteAddress);
     if (!erpRecords.length) {
-      throw new Error("ERP returned empty stock data");
+      result.errors.push("ERP returned empty stock data");
+      await db.system_config.update({
+        where: { ConfigKey: "erp_last_stock_sync" },
+        data: { ConfigValue: new Date().toISOString() },
+      });
+      invalidateConfigCache();
+      return result;
     }
     console.log(
       `[ERP SYNC] ✓ Fetched ${erpRecords.length} records from ERP in ${Date.now() - fetchStart}ms`,
@@ -900,6 +952,7 @@ export async function syncStockFromErp(remoteAddress?: string): Promise<StockSyn
       where: { ConfigKey: "erp_last_stock_sync" },
       data: { ConfigValue: new Date().toISOString() },
     });
+    invalidateConfigCache();
     console.log(`[ERP SYNC] ✓ Config updated in ${Date.now() - configStart}ms`);
 
     await setSyncProgress(100);
@@ -922,47 +975,62 @@ export async function syncStockFromErp(remoteAddress?: string): Promise<StockSyn
 
 /**
  * Create/update memo record from ERP stock record (single-item path; bulk sync uses bulkSyncMemosFromErpRecords).
- * MEMO_PARTY_CODE/MEMO_PARTY_NAME used when available
- * Falls back to MEMO_REMARK for client matching until API adds dedicated fields
+ * MEMO_CODE = client PartyCode; MEMO_INV_NO = memo invoice number (MemoNo).
  */
 export async function syncMemoFromErpRecord(
   record: ErpStockRecord,
   stockNo: string,
 ): Promise<void> {
   const terms = erpMemoTerms(record);
-  if (terms === 0) {
+  if (!record.MEMO_DATE || !record.MEMO_INV_NO?.trim() || terms === 0) {
     return;
   }
 
-  const memoDate = new Date(record.MEMO_DATE!);
+  const memoNo = erpMemoNo(record);
+  if (!memoNo) return;
+
+  const memoDate = new Date(record.MEMO_DATE);
   const memoEndDate = new Date(memoDate);
   memoEndDate.setDate(memoEndDate.getDate() + terms);
 
-  // Find client — use party code/name when available
-  // Fall back to MEMO_REMARK for now
   let clientId: string | null = null;
-
+  const partyCode = record.MEMO_CODE?.trim() ?? null;
+  const remarkName = record.MEMO_REMARK?.trim() ?? null;
   const partyName = erpPartyName(record);
 
-  if (partyName) {
-    const client = await db.clients.findFirst({
-      where: { PartyName: { equals: partyName, mode: "insensitive" } },
+  if (partyCode) {
+    const byCode = await db.clients.findUnique({
+      where: { PartyCode: partyCode },
+      select: { ClientID: true },
     });
-    if (client) {
-      clientId = client.ClientID;
-    } else {
-      const newClient = await db.clients.create({
-        data: {
-          PartyName: partyName,
-          PartyCode: record.MEMO_PARTY_CODE?.trim() ?? null,
-        },
-      });
-      clientId = newClient.ClientID;
-    }
+    if (byCode) clientId = byCode.ClientID;
   }
 
-  const memoNo = erpMemoNo(record, stockNo, memoDate);
-  const sharedMemo = Boolean(record.MEMO_CODE?.trim());
+  if (!clientId && remarkName) {
+    const byRemark = await db.clients.findFirst({
+      where: { PartyName: { equals: remarkName, mode: "insensitive" } },
+      select: { ClientID: true },
+    });
+    if (byRemark) clientId = byRemark.ClientID;
+  }
+
+  if (!clientId && partyName && partyName !== remarkName) {
+    const byName = await db.clients.findFirst({
+      where: { PartyName: { equals: partyName, mode: "insensitive" } },
+      select: { ClientID: true },
+    });
+    if (byName) clientId = byName.ClientID;
+  }
+
+  if (!clientId && (partyName || remarkName || partyCode)) {
+    const newClient = await db.clients.create({
+      data: {
+        PartyName: partyName ?? remarkName ?? partyCode!,
+        PartyCode: partyCode,
+      },
+    });
+    clientId = newClient.ClientID;
+  }
 
   const memoPayload = {
     MemoDate: memoDate,
@@ -973,24 +1041,9 @@ export async function syncMemoFromErpRecord(
     IsActive: true,
   };
 
-  // Current ERP MEMO_CODE is source of truth — close active links on other memos first.
   await detachStaleActiveMemoLinks(stockNo, memoNo);
 
-  let memo = await upsertMemoHeaderByNo(
-    memoNo,
-    memoPayload,
-    sharedMemo ? null : stockNo,
-  );
-
-  if (!memo.StockNo) {
-    const stockTaken = await db.memo.findUnique({ where: { StockNo: stockNo } });
-    if (!stockTaken) {
-      memo = await db.memo.update({
-        where: { MemoID: memo.MemoID },
-        data: { StockNo: stockNo },
-      });
-    }
-  }
+  const memo = await upsertMemoHeaderByNo(memoNo, memoPayload, null);
 
   await ensureActiveMemoStockLink(memo.MemoID, stockNo);
 }
@@ -1095,6 +1148,11 @@ export async function syncSalesFromErp(remoteAddress?: string): Promise<SalesSyn
   const erpRecords = await fetchErpSales(remoteAddress);
   if (!erpRecords.length) {
     result.errors.push("ERP returned empty sales data");
+    await db.system_config.update({
+      where: { ConfigKey: "erp_last_sales_sync" },
+      data: { ConfigValue: new Date().toISOString() },
+    });
+    invalidateConfigCache();
     return result;
   }
 
@@ -1160,6 +1218,7 @@ export async function syncSalesFromErp(remoteAddress?: string): Promise<SalesSyn
     where: { ConfigKey: "erp_last_sales_sync" },
     data: { ConfigValue: new Date().toISOString() },
   });
+  invalidateConfigCache();
 
   return result;
 }
